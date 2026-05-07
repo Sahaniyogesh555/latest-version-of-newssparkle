@@ -131,6 +131,33 @@ export default function Search() {
     setParams(next);
   };
 
+  const setTags = (tags: string[]) => {
+    const next = new URLSearchParams(params);
+    const unique = Array.from(new Set(tags.map(t => t.toLowerCase()))).filter(Boolean);
+    if (unique.length === 0) next.delete("tags");
+    else next.set("tags", unique.join(","));
+    setParams(next);
+  };
+
+  const addTag = (raw: string) => {
+    const t = raw.trim().toLowerCase();
+    if (!t) return;
+    if (selectedTags.includes(t)) return;
+    setTags([...selectedTags, t]);
+  };
+
+  const removeTag = (t: string) => setTags(selectedTags.filter(x => x !== t));
+
+  const onTagKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      addTag(tagInput);
+      setTagInput("");
+    } else if (e.key === "Backspace" && !tagInput && selectedTags.length > 0) {
+      removeTag(selectedTags[selectedTags.length - 1]);
+    }
+  };
+
   const clearFilters = () => {
     const next = new URLSearchParams();
     if (q) next.set("q", q);
@@ -140,7 +167,9 @@ export default function Search() {
   const activeFilterCount =
     (category !== "all" ? 1 : 0) +
     (range !== "any" ? 1 : 0) +
-    (sort !== "newest" ? 1 : 0);
+    (sort !== "newest" ? 1 : 0) +
+    (author !== "all" ? 1 : 0) +
+    (selectedTags.length > 0 ? 1 : 0);
 
   return (
     <Layout>
