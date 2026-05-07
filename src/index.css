@@ -54,35 +54,35 @@
 
   .dark {
     --background: 20 14% 6%;
-    --foreground: 38 30% 94%;
+    --foreground: 38 35% 96%;
 
     --card: 20 14% 9%;
-    --card-foreground: 38 30% 94%;
+    --card-foreground: 38 35% 96%;
 
     --popover: 20 14% 10%;
-    --popover-foreground: 38 30% 94%;
+    --popover-foreground: 38 35% 96%;
 
-    --primary: 12 95% 62%;
+    --primary: 14 95% 66%;
     --primary-foreground: 20 14% 6%;
 
-    --secondary: 20 12% 14%;
-    --secondary-foreground: 38 30% 94%;
+    --secondary: 20 12% 15%;
+    --secondary-foreground: 38 35% 96%;
 
     --muted: 20 12% 13%;
-    --muted-foreground: 38 12% 70%;
+    --muted-foreground: 38 18% 78%;
 
-    --accent: 220 80% 70%;
+    --accent: 220 85% 75%;
     --accent-foreground: 20 14% 6%;
 
     --destructive: 0 80% 62%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 20 12% 20%;
-    --input: 20 12% 20%;
-    --ring: 12 95% 62%;
+    --border: 20 10% 24%;
+    --input: 20 10% 24%;
+    --ring: 14 95% 66%;
 
-    --headline: 38 35% 96%;
-    --byline: 38 12% 68%;
+    --headline: 0 0% 100%;
+    --byline: 38 18% 78%;
     --rule: 38 30% 90%;
 
     --cat-breaking: 0 85% 65%;
@@ -104,7 +104,16 @@
 
   .dark { color-scheme: dark; }
   :root { color-scheme: light; }
-  .dark img:not([src*=".svg"]) { filter: brightness(0.92) contrast(1.02); }
+  .dark img:not([src*=".svg"]) { filter: brightness(0.95) contrast(1.03); }
+
+  /* Dark-mode typography & link contrast */
+  .dark body { -webkit-font-smoothing: antialiased; }
+  .dark .prose-article p,
+  .dark .prose-article li { @apply text-foreground/95; }
+  .dark .prose-article a { @apply text-accent decoration-accent/60 underline-offset-[3px] hover:decoration-accent; }
+  .dark .prose-article strong { color: hsl(0 0% 100%); }
+  .dark .prose-article blockquote { color: hsl(0 0% 100% / 0.95); }
+  .dark a:focus-visible { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background rounded-sm; }
 }
 
 @layer base {
