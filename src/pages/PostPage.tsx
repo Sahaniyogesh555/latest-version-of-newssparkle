@@ -7,8 +7,11 @@ import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
+import { ReadingProgress } from "@/components/ReadingProgress";
+import { AuthorBio } from "@/components/AuthorBio";
+import { findAuthor } from "@/lib/authors";
 import { CATEGORIES, formatDate, SITE } from "@/lib/site";
-import { Share2, Clock } from "lucide-react";
+import { Share2, Clock, RefreshCw } from "lucide-react";
 
 export default function PostPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -39,6 +42,8 @@ export default function PostPage() {
   if (loading || !post) return <Layout><div className="container-prose py-20 animate-pulse space-y-4"><div className="h-12 bg-muted" /><div className="h-72 bg-muted" /></div></Layout>;
 
   const cat = CATEGORIES.find(c => c.slug === post.category_slug);
+  const authorProfile = findAuthor(post.author);
+  const wasUpdated = post.updated_at && post.updated_at !== post.published_at;
 
   const url = `${SITE.url}/post/${post.slug}`;
   const wordCount = post.content ? post.content.trim().split(/\s+/).length : undefined;
@@ -51,7 +56,7 @@ export default function PostPage() {
     image: post.featured_image_url ? [post.featured_image_url] : undefined,
     datePublished: post.published_at,
     dateModified: post.updated_at || post.published_at,
-    author: [{ "@type": "Person", name: post.author }],
+    author: [{ "@type": "Person", name: authorProfile.name, url: `${SITE.url}/author/${authorProfile.slug}`, image: authorProfile.image, jobTitle: authorProfile.role }],
     publisher: {
       "@type": "Organization",
       name: SITE.name,
