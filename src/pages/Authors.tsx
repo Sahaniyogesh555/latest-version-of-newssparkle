@@ -44,12 +44,15 @@ export default function Authors() {
 
         <div className="mt-12 grid gap-6 md:grid-cols-2">
           {AUTHORS.map(a => (
-            <article key={a.name} className="border border-border p-6 bg-background">
-              <div className="kicker text-byline">{a.role}</div>
-              <h2 className="font-serif text-xl font-bold text-headline mt-1">{a.name}</h2>
-              <p className="text-sm text-primary mt-1 font-semibold">{a.beat}</p>
-              <p className="mt-3 text-sm text-foreground/85 leading-relaxed">{a.bio}</p>
-            </article>
+            <Link key={a.slug} to={`/author/${a.slug}`} className="group flex gap-4 border border-border p-6 bg-background hover:border-primary transition-colors">
+              <img src={a.image} alt={`${a.name} avatar`} width={64} height={64} loading="lazy" decoding="async" className="size-16 rounded-full bg-muted object-cover shrink-0 ring-1 ring-border" />
+              <div>
+                <div className="kicker text-byline">{a.role}</div>
+                <h2 className="font-serif text-xl font-bold text-headline mt-1 group-hover:text-primary transition-colors">{a.name}</h2>
+                <p className="text-sm text-primary mt-1 font-semibold">{a.beat}</p>
+                <p className="mt-3 text-sm text-foreground/85 leading-relaxed">{a.bio}</p>
+              </div>
+            </Link>
           ))}
         </div>
 
