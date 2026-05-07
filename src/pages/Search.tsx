@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
 import { Post } from "@/lib/types";
+import { AUTHORS } from "@/lib/authors";
+import { X } from "lucide-react";
 
 type Category = { slug: string; name: string };
 type DateRange = "any" | "24h" | "7d" | "30d" | "year" | "custom";
@@ -39,28 +41,51 @@ export default function Search() {
   const fromDate = params.get("from") || "";
   const toDate = params.get("to") || "";
   const sort = (params.get("sort") as SortBy) || "newest";
+  const author = params.get("author") || "all";
+  const tagsParam = params.get("tags") || "";
+  const selectedTags = useMemo(
+    () => tagsParam.split(",").map(t => t.trim()).filter(Boolean),
+    [tagsParam],
+  );
 
   const [input, setInput] = useState(q);
+  const [tagInput, setTagInput] = useState("");
   const [results, setResults] = useState<Post[]>([]);
   const [loading, setLoading] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [authors, setAuthors] = useState<string[]>([]);
 
   useEffect(() => { setInput(q); }, [q]);
 
   useEffect(() => {
     supabase.from("categories").select("slug,name").order("name")
       .then(({ data }) => setCategories((data as Category[]) || []));
+
+    supabase.from("posts").select("author").eq("status", "published").limit(1000)
+      .then(({ data }) => {
+        const set = new Set<string>();
+        (data as { author: string }[] | null)?.forEach(r => r.author && set.add(r.author));
+        AUTHORS.forEach(a => set.add(a.name));
+        setAuthors(Array.from(set).sort((a, b) => a.localeCompare(b)));
+      });
   }, []);
 
   useEffect(() => {
-    if (!q) { setResults([]); return; }
+    if (!q && category === "all" && range === "any" && author === "all" && selectedTags.length === 0) {
+      setResults([]); return;
+    }
     setLoading(true);
-    const term = q.replace(/[%_]/g, "\\$&");
 
-    let query = supabase.from("posts").select("*").eq("status", "published")
-      .or(`title.ilike.%${term}%,excerpt.ilike.%${term}%,content.ilike.%${term}%`);
+    let query = supabase.from("posts").select("*").eq("status", "published");
+
+    if (q) {
+      const term = q.replace(/[%_]/g, "\\$&");
+      query = query.or(`title.ilike.%${term}%,excerpt.ilike.%${term}%,content.ilike.%${term}%`);
+    }
 
     if (category !== "all") query = query.eq("category_slug", category);
+    if (author !== "all") query = query.eq("author", author);
+    if (selectedTags.length > 0) query = query.contains("keywords", selectedTags);
 
     if (range === "custom") {
       if (fromDate) query = query.gte("published_at", new Date(fromDate).toISOString());
@@ -82,7 +107,7 @@ export default function Search() {
       setResults((data as Post[]) || []);
       setLoading(false);
     });
-  }, [q, category, range, fromDate, toDate, sort]);
+  }, [q, category, range, fromDate, toDate, sort, author, tagsParam, selectedTags]);
 
   const updateParam = (key: string, value: string) => {
     const next = new URLSearchParams(params);
@@ -106,6 +131,33 @@ export default function Search() {
     setParams(next);
   };
 
+  const setTags = (tags: string[]) => {
+    const next = new URLSearchParams(params);
+    const unique = Array.from(new Set(tags.map(t => t.toLowerCase()))).filter(Boolean);
+    if (unique.length === 0) next.delete("tags");
+    else next.set("tags", unique.join(","));
+    setParams(next);
+  };
+
+  const addTag = (raw: string) => {
+    const t = raw.trim().toLowerCase();
+    if (!t) return;
+    if (selectedTags.includes(t)) return;
+    setTags([...selectedTags, t]);
+  };
+
+  const removeTag = (t: string) => setTags(selectedTags.filter(x => x !== t));
+
+  const onTagKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      addTag(tagInput);
+      setTagInput("");
+    } else if (e.key === "Backspace" && !tagInput && selectedTags.length > 0) {
+      removeTag(selectedTags[selectedTags.length - 1]);
+    }
+  };
+
   const clearFilters = () => {
     const next = new URLSearchParams();
     if (q) next.set("q", q);
@@ -115,7 +167,9 @@ export default function Search() {
   const activeFilterCount =
     (category !== "all" ? 1 : 0) +
     (range !== "any" ? 1 : 0) +
-    (sort !== "newest" ? 1 : 0);
+    (sort !== "newest" ? 1 : 0) +
+    (author !== "all" ? 1 : 0) +
+    (selectedTags.length > 0 ? 1 : 0);
 
   return (
     <Layout>
@@ -139,7 +193,7 @@ export default function Search() {
           <button className="px-5 py-3 bg-primary text-primary-foreground font-semibold">Search</button>
         </form>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
             Category
             <select
@@ -153,6 +207,19 @@ export default function Search() {
               ))}
             </select>
           </label>
+
+          <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
+            Author
+            <select
+              value={author}
+              onChange={e => updateParam("author", e.target.value)}
+              className="px-3 py-2 bg-background border border-border focus:border-primary focus:outline-none text-sm text-foreground normal-case tracking-normal"
+            >
+              <option value="all">All authors</option>
+              {authors.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </label>
+
 
           <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
             Published
@@ -204,10 +271,44 @@ export default function Search() {
           </div>
         )}
 
-        {q && (
+        <div className="mt-3">
+          <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
+            Tags / Keywords
+            <div className="flex flex-wrap items-center gap-2 px-2 py-2 bg-background border border-border focus-within:border-primary">
+              {selectedTags.map(t => (
+                <span
+                  key={t}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary rounded text-xs normal-case tracking-normal"
+                >
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => removeTag(t)}
+                    aria-label={`Remove ${t}`}
+                    className="hover:text-foreground"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ))}
+              <input
+                value={tagInput}
+                onChange={e => setTagInput(e.target.value)}
+                onKeyDown={onTagKeyDown}
+                onBlur={() => { if (tagInput) { addTag(tagInput); setTagInput(""); } }}
+                placeholder={selectedTags.length ? "" : "Type a tag and press Enter"}
+                className="flex-1 min-w-[120px] bg-transparent text-sm text-foreground normal-case tracking-normal focus:outline-none py-1"
+              />
+            </div>
+          </label>
+        </div>
+
+        {(q || activeFilterCount > 0) && (
           <div className="mt-6 flex items-center justify-between gap-3">
             <p className="text-sm text-byline">
-              {loading ? "Searching…" : `${results.length} result${results.length === 1 ? "" : "s"} for "${q}"`}
+              {loading
+                ? "Searching…"
+                : `${results.length} result${results.length === 1 ? "" : "s"}${q ? ` for "${q}"` : ""}`}
             </p>
             {activeFilterCount > 0 && (
               <button
@@ -227,7 +328,7 @@ export default function Search() {
             {results.map(p => <PostCard key={p.id} post={p} />)}
           </div>
         )}
-        {!loading && q && results.length === 0 && (
+        {!loading && (q || activeFilterCount > 0) && results.length === 0 && (
           <p className="text-center py-20 text-byline">No stories matched. Try a broader query or different filters.</p>
         )}
       </div>
