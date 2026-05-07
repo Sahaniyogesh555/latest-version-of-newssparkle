@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.notifications-dispatcher]
 verify_jwt = false
+
+[functions.rss]
+verify_jwt = false
