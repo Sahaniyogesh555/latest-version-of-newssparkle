@@ -9,9 +9,11 @@ import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
 import { ReadingProgress } from "@/components/ReadingProgress";
 import { AuthorBio } from "@/components/AuthorBio";
+import { ShareBar } from "@/components/ShareBar";
+import { BookmarkButton } from "@/components/BookmarkButton";
 import { findAuthor } from "@/lib/authors";
 import { CATEGORIES, formatDate, SITE } from "@/lib/site";
-import { Share2, Clock, RefreshCw } from "lucide-react";
+import { Clock, RefreshCw } from "lucide-react";
 
 export default function PostPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -125,7 +127,12 @@ export default function PostPage() {
               <span>{formatDate(post.published_at)}</span>
               {wasUpdated && <span className="flex items-center gap-1 text-primary"><RefreshCw className="size-3" /> Updated {formatDate(post.updated_at)}</span>}
               <span className="flex items-center gap-1"><Clock className="size-3" /> {post.reading_minutes} min read</span>
-              <button onClick={() => navigator.share?.({ title: post.title, url: window.location.href }).catch(()=>{})} className="ml-auto flex items-center gap-1 hover:text-primary"><Share2 className="size-3" /> Share</button>
+              <span className="ml-auto flex items-center gap-3">
+                <BookmarkButton post={{ slug: post.slug, title: post.title, excerpt: post.excerpt, category_slug: post.category_slug, featured_image_url: post.featured_image_url, published_at: post.published_at }} showLabel />
+              </span>
+            </div>
+            <div className="mt-4">
+              <ShareBar url={url} title={post.title} />
             </div>
           </div>
         </header>
@@ -189,7 +196,7 @@ export default function PostPage() {
           {post.keywords && post.keywords.length > 0 && (
             <div className="mt-10 pt-6 border-t border-border flex flex-wrap gap-2">
               {post.keywords.map(k => (
-                <span key={k} className="text-xs uppercase tracking-wider bg-muted px-2.5 py-1 text-byline">{k}</span>
+                <Link key={k} to={`/tag/${encodeURIComponent(k)}`} className="text-xs uppercase tracking-wider bg-muted px-2.5 py-1 text-byline hover:bg-primary hover:text-primary-foreground transition-colors">{k}</Link>
               ))}
             </div>
           )}

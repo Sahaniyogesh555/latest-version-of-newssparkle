@@ -163,12 +163,13 @@ export default function Index() {
             </h2>
             <div className="flex flex-wrap gap-2.5">
               {trendingTags.map(tag => (
-                <span
+                <Link
                   key={tag}
-                  className="px-3.5 py-1.5 text-sm bg-background border border-border text-foreground/80 hover:border-primary hover:text-primary transition-colors cursor-default"
+                  to={`/tag/${encodeURIComponent(tag)}`}
+                  className="px-3.5 py-1.5 text-sm bg-background border border-border text-foreground/80 hover:border-primary hover:text-primary transition-colors"
                 >
                   #{tag}
-                </span>
+                </Link>
               ))}
             </div>
           </div>

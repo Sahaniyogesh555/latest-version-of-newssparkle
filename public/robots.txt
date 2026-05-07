@@ -19,3 +19,4 @@ Allow: /
 
 Sitemap: https://newssparkle.lovable.app/sitemap.xml
 Sitemap: https://newssparkle.lovable.app/functions/v1/sitemap
+Sitemap: https://newssparkle.lovable.app/functions/v1/news-sitemap

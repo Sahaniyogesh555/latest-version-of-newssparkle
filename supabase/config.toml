@@ -1,1 +1,7 @@
 project_id = "ruusbjlabbojpbawbphc"
+
+[functions.sitemap]
+verify_jwt = false
+
+[functions.news-sitemap]
+verify_jwt = false

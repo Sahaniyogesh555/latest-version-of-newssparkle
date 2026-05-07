@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Post } from "@/lib/types";
 import { CATEGORIES, formatDate } from "@/lib/site";
+import { BookmarkButton } from "./BookmarkButton";
 
 interface Props { post: Post; variant?: "hero" | "lead" | "default" | "compact" }
 
@@ -53,8 +54,9 @@ export function PostCard({ post, variant = "default" }: Props) {
         <span className="kicker" style={{ color: catColor }}>{cat?.name}</span>
         <h3 className="headline-card mt-2 group-hover:text-primary transition-colors">{post.title}</h3>
         <p className="mt-2 text-sm text-foreground/75 leading-relaxed line-clamp-3">{post.excerpt}</p>
-        <div className="mt-3 text-[11px] text-byline uppercase tracking-wider">
-          {formatDate(post.published_at)} · {post.reading_minutes} min
+        <div className="mt-3 flex items-center justify-between text-[11px] text-byline uppercase tracking-wider">
+          <span>{formatDate(post.published_at)} · {post.reading_minutes} min</span>
+          <BookmarkButton size="sm" post={{ slug: post.slug, title: post.title, excerpt: post.excerpt, category_slug: post.category_slug, featured_image_url: post.featured_image_url, published_at: post.published_at }} />
         </div>
       </article>
     </Link>
