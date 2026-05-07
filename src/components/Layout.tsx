@@ -27,6 +27,7 @@ export function Layout({ children }: { children: ReactNode }) {
       <Footer />
       <CookieConsent />
       <PushNotificationsPrompt />
+      <BreakingNewsAlerts />
       <BackToTop />
     </div>
   );
