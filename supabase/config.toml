@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.rss]
 verify_jwt = false
+
+[functions.validate-feeds]
+verify_jwt = false
