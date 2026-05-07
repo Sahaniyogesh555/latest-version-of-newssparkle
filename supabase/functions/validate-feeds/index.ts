@@ -126,11 +126,12 @@ function validateRss(name: string, body: string, contentType: string): Issue[] {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
+  const FN_BASE = `${Deno.env.get("SUPABASE_URL")}/functions/v1`;
   const targets = [
     { name: "sitemap-index", url: `${SITE_URL}/sitemap.xml`, kind: "sitemap" as const },
-    { name: "sitemap", url: `${SITE_URL}/functions/v1/sitemap`, kind: "sitemap" as const },
-    { name: "news-sitemap", url: `${SITE_URL}/functions/v1/news-sitemap`, kind: "sitemap" as const },
-    { name: "rss", url: `${SITE_URL}/functions/v1/rss`, kind: "rss" as const },
+    { name: "sitemap", url: `${FN_BASE}/sitemap`, kind: "sitemap" as const },
+    { name: "news-sitemap", url: `${FN_BASE}/news-sitemap`, kind: "sitemap" as const },
+    { name: "rss", url: `${FN_BASE}/rss`, kind: "rss" as const },
   ];
 
   const report: Array<{ feed: string; url: string; status: number; issues: Issue[]; bytes: number }> = [];
