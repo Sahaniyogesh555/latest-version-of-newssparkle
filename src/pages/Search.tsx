@@ -303,10 +303,12 @@ export default function Search() {
           </label>
         </div>
 
-        {q && (
+        {(q || activeFilterCount > 0) && (
           <div className="mt-6 flex items-center justify-between gap-3">
             <p className="text-sm text-byline">
-              {loading ? "Searching…" : `${results.length} result${results.length === 1 ? "" : "s"} for "${q}"`}
+              {loading
+                ? "Searching…"
+                : `${results.length} result${results.length === 1 ? "" : "s"}${q ? ` for "${q}"` : ""}`}
             </p>
             {activeFilterCount > 0 && (
               <button
@@ -326,7 +328,7 @@ export default function Search() {
             {results.map(p => <PostCard key={p.id} post={p} />)}
           </div>
         )}
-        {!loading && q && results.length === 0 && (
+        {!loading && (q || activeFilterCount > 0) && results.length === 0 && (
           <p className="text-center py-20 text-byline">No stories matched. Try a broader query or different filters.</p>
         )}
       </div>
