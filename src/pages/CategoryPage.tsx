@@ -172,14 +172,25 @@ export default function CategoryPage() {
 
   const jsonLd = faqLd ? [collectionLd, faqLd] : collectionLd;
 
+  const pageSuffix = page > 1 ? ` — Page ${page}` : "";
+  const canonicalPath = page > 1 ? `/category/${cat.slug}?page=${page}` : `/category/${cat.slug}`;
+  const prevHref = page > 2 ? `${SITE.url}/category/${cat.slug}?page=${page - 1}` : page === 2 ? `${SITE.url}/category/${cat.slug}` : undefined;
+  const nextHref = page < totalPages ? `${SITE.url}/category/${cat.slug}?page=${page + 1}` : undefined;
+
   return (
     <Layout>
       <SEO
-        title={`${cat.name} News & Analysis`}
+        title={`${cat.name} News & Analysis${pageSuffix}`}
         description={description}
-        path={`/category/${cat.slug}`}
+        path={canonicalPath}
         jsonLd={jsonLd}
       />
+      {(prevHref || nextHref) && (
+        <Helmet>
+          {prevHref && <link rel="prev" href={prevHref} />}
+          {nextHref && <link rel="next" href={nextHref} />}
+        </Helmet>
+      )}
       <section className="border-b border-rule bg-secondary/30">
         <div className="container-wide py-12">
           <nav aria-label="Breadcrumb" className="text-xs text-byline uppercase tracking-wider mb-4">
@@ -188,7 +199,7 @@ export default function CategoryPage() {
             <span style={{ color: `hsl(var(--${cat.color}))` }}>{cat.name}</span>
           </nav>
           <span className="kicker" style={{ color: `hsl(var(--${cat.color}))` }}>Section</span>
-          <h1 className="headline-hero mt-2">{cat.name}</h1>
+          <h1 className="headline-hero mt-2">{cat.name}{pageSuffix}</h1>
           <p className="mt-4 max-w-2xl text-lg text-foreground/80">
             In-depth {cat.name.toLowerCase()} reporting, analysis and live updates from around the world.
           </p>
@@ -213,10 +224,38 @@ export default function CategoryPage() {
           </div>
         ) : (
           <>
-            {posts[0] && <div className="mb-12 pb-12 border-b border-border"><PostCard post={posts[0]} variant="hero" /></div>}
+            {page === 1 && posts[0] && <div className="mb-12 pb-12 border-b border-border"><PostCard post={posts[0]} variant="hero" /></div>}
             <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3">
-              {posts.slice(1).map(p => <PostCard key={p.id} post={p} />)}
+              {(page === 1 ? posts.slice(1) : posts).map(p => <PostCard key={p.id} post={p} />)}
             </div>
+            {totalPages > 1 && (
+              <nav aria-label="Pagination" className="mt-12 flex items-center justify-center gap-2">
+                {page > 1 && (
+                  <Link to={`/category/${cat.slug}${page - 1 > 1 ? `?page=${page - 1}` : ""}`} className="flex items-center gap-1 px-4 py-2 border border-border hover:border-primary hover:text-primary text-sm" rel="prev">
+                    <ChevronLeft className="size-4" /> Prev
+                  </Link>
+                )}
+                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                  .filter(n => n === 1 || n === totalPages || Math.abs(n - page) <= 1)
+                  .map((n, idx, arr) => (
+                    <span key={n} className="flex items-center">
+                      {idx > 0 && arr[idx - 1] !== n - 1 && <span className="px-2 text-byline">…</span>}
+                      <Link
+                        to={`/category/${cat.slug}${n > 1 ? `?page=${n}` : ""}`}
+                        aria-current={n === page ? "page" : undefined}
+                        className={`px-3.5 py-2 border text-sm ${n === page ? "bg-primary text-primary-foreground border-primary" : "border-border hover:border-primary hover:text-primary"}`}
+                      >
+                        {n}
+                      </Link>
+                    </span>
+                  ))}
+                {page < totalPages && (
+                  <Link to={`/category/${cat.slug}?page=${page + 1}`} className="flex items-center gap-1 px-4 py-2 border border-border hover:border-primary hover:text-primary text-sm" rel="next">
+                    Next <ChevronRight className="size-4" />
+                  </Link>
+                )}
+              </nav>
+            )}
           </>
         )}
       </div>
