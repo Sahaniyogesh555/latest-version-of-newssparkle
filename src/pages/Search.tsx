@@ -271,6 +271,38 @@ export default function Search() {
           </div>
         )}
 
+        <div className="mt-3">
+          <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
+            Tags / Keywords
+            <div className="flex flex-wrap items-center gap-2 px-2 py-2 bg-background border border-border focus-within:border-primary">
+              {selectedTags.map(t => (
+                <span
+                  key={t}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary rounded text-xs normal-case tracking-normal"
+                >
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => removeTag(t)}
+                    aria-label={`Remove ${t}`}
+                    className="hover:text-foreground"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ))}
+              <input
+                value={tagInput}
+                onChange={e => setTagInput(e.target.value)}
+                onKeyDown={onTagKeyDown}
+                onBlur={() => { if (tagInput) { addTag(tagInput); setTagInput(""); } }}
+                placeholder={selectedTags.length ? "" : "Type a tag and press Enter"}
+                className="flex-1 min-w-[120px] bg-transparent text-sm text-foreground normal-case tracking-normal focus:outline-none py-1"
+              />
+            </div>
+          </label>
+        </div>
+
         {q && (
           <div className="mt-6 flex items-center justify-between gap-3">
             <p className="text-sm text-byline">
