@@ -41,6 +41,54 @@ export type Database = {
         }
         Relationships: []
       }
+      notifications: {
+        Row: {
+          alert_day: string
+          category_slug: string | null
+          created_at: string
+          excerpt: string | null
+          expires_at: string
+          id: string
+          image_url: string | null
+          kind: string
+          post_id: string | null
+          reason: string | null
+          slug: string
+          title: string
+          views_at_alert: number | null
+        }
+        Insert: {
+          alert_day?: string
+          category_slug?: string | null
+          created_at?: string
+          excerpt?: string | null
+          expires_at?: string
+          id?: string
+          image_url?: string | null
+          kind: string
+          post_id?: string | null
+          reason?: string | null
+          slug: string
+          title: string
+          views_at_alert?: number | null
+        }
+        Update: {
+          alert_day?: string
+          category_slug?: string | null
+          created_at?: string
+          excerpt?: string | null
+          expires_at?: string
+          id?: string
+          image_url?: string | null
+          kind?: string
+          post_id?: string | null
+          reason?: string | null
+          slug?: string
+          title?: string
+          views_at_alert?: number | null
+        }
+        Relationships: []
+      }
       posts: {
         Row: {
           author: string
