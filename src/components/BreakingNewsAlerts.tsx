@@ -47,7 +47,7 @@ function fireBrowserNotification(a: AlertRow) {
     );
     n.onclick = () => {
       window.focus();
-      window.location.href = `/${a.slug}`;
+      window.location.href = `/post/${a.slug}`;
       n.close();
     };
   } catch {
@@ -121,7 +121,7 @@ export function BreakingNewsAlerts() {
         <X className="size-4" />
       </button>
       <Link
-        to={`/${active.slug}`}
+        to={`/post/${active.slug}`}
         onClick={dismiss}
         className="flex gap-3 pr-5 items-start"
       >
