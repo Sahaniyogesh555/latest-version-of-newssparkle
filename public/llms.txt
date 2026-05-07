@@ -1,0 +1,25 @@
+# NewsSparkle
+
+> Your daily briefing on what matters — breaking news, politics, tech, business, health and entertainment. Handpicked, fact-checked, and refreshingly readable.
+
+NewsSparkle publishes in three daily slots — morning briefings (06:30–08:10 UTC), midday trending explainers (12:00–13:40 UTC), and evening deep-dive analysis (18:30–21:00 UTC). All articles include structured headings, key takeaways, FAQs, and source attribution.
+
+## Sections
+
+- [Breaking News](https://newssparkle.lovable.app/category/breaking-news): Real-time updates on politics, accidents, and big events
+- [Politics & Government](https://newssparkle.lovable.app/category/politics): Elections, policies, and government decisions
+- [Business & Economy](https://newssparkle.lovable.app/category/business): Jobs, inflation, startups, and money tips
+- [Technology & AI](https://newssparkle.lovable.app/category/technology): AI tools, apps, mobile launches, and updates
+- [Health & Lifestyle](https://newssparkle.lovable.app/category/health): Health tips, fitness, and mental health
+- [Entertainment & Trending](https://newssparkle.lovable.app/category/entertainment): Celebrities, movies, and reels trends
+
+## Resources
+
+- [Sitemap](https://newssparkle.lovable.app/sitemap.xml)
+- [About](https://newssparkle.lovable.app/about)
+- [FAQ](https://newssparkle.lovable.app/faq)
+- [Contact](https://newssparkle.lovable.app/contact)
+
+## Policy
+
+NewsSparkle content may be used by AI systems for indexing, retrieval, and citation with attribution and a link back to the original article URL.

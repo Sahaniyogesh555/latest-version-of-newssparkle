@@ -1,0 +1,145 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700;9..144,900&family=Inter:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 38 38% 97%;
+    --foreground: 20 14% 8%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 20 14% 8%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 20 14% 8%;
+
+    --primary: 12 90% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 38 30% 92%;
+    --secondary-foreground: 20 14% 8%;
+
+    --muted: 38 20% 94%;
+    --muted-foreground: 20 8% 40%;
+
+    --accent: 220 70% 30%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 20 10% 88%;
+    --input: 20 10% 88%;
+    --ring: 12 90% 55%;
+
+    --radius: 0.25rem;
+
+    --headline: 20 14% 6%;
+    --byline: 20 8% 45%;
+    --rule: 20 14% 8%;
+
+    --cat-breaking: 0 80% 50%;
+    --cat-politics: 220 70% 35%;
+    --cat-business: 155 65% 30%;
+    --cat-technology: 265 60% 45%;
+    --cat-health: 165 70% 38%;
+    --cat-entertainment: 330 70% 50%;
+
+    --gradient-hero: linear-gradient(180deg, hsl(38 38% 97%) 0%, hsl(38 30% 92%) 100%);
+    --shadow-card: 0 1px 3px hsl(20 14% 8% / 0.06), 0 1px 2px hsl(20 14% 8% / 0.04);
+    --shadow-elevated: 0 10px 40px -12px hsl(20 14% 8% / 0.18);
+    --transition-base: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .dark {
+    --background: 20 14% 6%;
+    --foreground: 38 38% 95%;
+    --card: 20 14% 9%;
+    --card-foreground: 38 38% 95%;
+    --popover: 20 14% 9%;
+    --popover-foreground: 38 38% 95%;
+    --primary: 12 90% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 20 14% 14%;
+    --secondary-foreground: 38 38% 95%;
+    --muted: 20 14% 14%;
+    --muted-foreground: 38 10% 65%;
+    --accent: 220 70% 60%;
+    --accent-foreground: 20 14% 6%;
+    --border: 20 14% 18%;
+    --input: 20 14% 18%;
+    --ring: 12 90% 60%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html { scroll-behavior: smooth; }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-feature-settings: 'ss01', 'cv11';
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Fraunces', Georgia, serif;
+    @apply tracking-tight text-headline;
+    font-feature-settings: 'ss01';
+  }
+}
+
+@layer components {
+  .container-prose { @apply mx-auto w-full max-w-3xl px-4 sm:px-6; }
+  .container-wide { @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8; }
+
+  .kicker {
+    @apply inline-block text-[11px] font-bold uppercase tracking-[0.14em];
+  }
+
+  .rule-top { @apply border-t-2 border-rule pt-3; }
+
+  .headline-hero {
+    font-family: 'Fraunces', serif;
+    @apply text-4xl sm:text-5xl md:text-6xl font-black leading-[1.05] tracking-tight;
+  }
+  .headline-card {
+    font-family: 'Fraunces', serif;
+    @apply text-xl sm:text-2xl font-bold leading-[1.15];
+  }
+
+  .prose-article {
+    @apply max-w-none text-foreground;
+  }
+  .prose-article p { @apply text-[1.0625rem] leading-[1.75] mb-5 text-foreground/90; }
+  .prose-article h2 {
+    font-family: 'Fraunces', serif;
+    @apply text-2xl sm:text-3xl font-bold mt-10 mb-4 text-headline;
+  }
+  .prose-article h3 {
+    font-family: 'Fraunces', serif;
+    @apply text-xl sm:text-2xl font-semibold mt-8 mb-3 text-headline;
+  }
+  .prose-article ul { @apply list-disc pl-6 mb-5 space-y-2; }
+  .prose-article ol { @apply list-decimal pl-6 mb-5 space-y-2; }
+  .prose-article li { @apply text-[1.0625rem] leading-[1.7] text-foreground/90; }
+  .prose-article a { @apply text-primary underline underline-offset-2 hover:no-underline; }
+  .prose-article blockquote {
+    @apply border-l-4 border-primary pl-5 my-6 italic text-xl text-headline;
+    font-family: 'Fraunces', serif;
+  }
+  .prose-article strong { @apply font-semibold text-headline; }
+  .prose-article img { @apply rounded-sm my-6 w-full; }
+  .prose-article code { @apply bg-muted px-1.5 py-0.5 rounded text-sm; }
+
+  .ad-slot {
+    @apply flex items-center justify-center bg-muted/60 border border-dashed border-border text-xs text-muted-foreground uppercase tracking-wider;
+    min-height: 90px;
+  }
+}
+
+/* Hide Google Translate banner/iframe */
+.goog-te-banner-frame, .skiptranslate { display: none !important; }
+body { top: 0 !important; }
+.goog-tooltip, .goog-tooltip:hover { display: none !important; }
+.goog-text-highlight { background: transparent !important; box-shadow: none !important; }
+#google_translate_element { display: none !important; }
