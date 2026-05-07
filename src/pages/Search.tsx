@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
 import { Post } from "@/lib/types";
+import { AUTHORS } from "@/lib/authors";
+import { X } from "lucide-react";
 
 type Category = { slug: string; name: string };
 type DateRange = "any" | "24h" | "7d" | "30d" | "year" | "custom";
