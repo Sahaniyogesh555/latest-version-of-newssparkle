@@ -41,6 +41,30 @@ export type Database = {
         }
         Relationships: []
       }
+      feed_validation_runs: {
+        Row: {
+          created_at: string
+          id: string
+          report: Json
+          total_errors: number
+          total_warnings: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          report?: Json
+          total_errors?: number
+          total_warnings?: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          report?: Json
+          total_errors?: number
+          total_warnings?: number
+        }
+        Relationships: []
+      }
       notifications: {
         Row: {
           alert_day: string
