@@ -1,13 +1,16 @@
 import { Link, NavLink, useLocation } from "react-router-dom";
-import { Menu, X } from "lucide-react";
+import { Menu, X, Bookmark, Sun, Moon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { CATEGORIES, SITE } from "@/lib/site";
 import { cn } from "@/lib/utils";
 import { LanguageToggle } from "./LanguageToggle";
+import { HeaderSearch } from "./HeaderSearch";
+import { useTheme } from "@/hooks/use-theme";
 
 export function Header() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
+  const { theme, toggle } = useTheme();
   useEffect(() => setOpen(false), [location.pathname]);
 
   // Split brand name into two parts: e.g. "NewsSparkle" → "News" + "Sparkle"
@@ -52,7 +55,18 @@ export function Header() {
             ))}
           </nav>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 sm:gap-2">
+            <HeaderSearch />
+            <Link to="/bookmarks" aria-label="Saved articles" className="p-1.5 text-headline hover:text-primary transition-colors hidden sm:inline-flex">
+              <Bookmark className="size-5" />
+            </Link>
+            <button
+              onClick={toggle}
+              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              className="p-1.5 text-headline hover:text-primary transition-colors"
+            >
+              {theme === "dark" ? <Sun className="size-5" /> : <Moon className="size-5" />}
+            </button>
             <LanguageToggle />
             <button
               className="md:hidden p-1.5 -mr-1.5"
