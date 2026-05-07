@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Post } from "@/lib/types";
 import { CATEGORIES, formatDate } from "@/lib/site";
+import { BookmarkButton } from "./BookmarkButton";
 
 interface Props { post: Post; variant?: "hero" | "lead" | "default" | "compact" }
 
