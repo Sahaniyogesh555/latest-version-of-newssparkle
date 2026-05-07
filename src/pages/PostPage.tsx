@@ -9,9 +9,11 @@ import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
 import { ReadingProgress } from "@/components/ReadingProgress";
 import { AuthorBio } from "@/components/AuthorBio";
+import { ShareBar } from "@/components/ShareBar";
+import { BookmarkButton } from "@/components/BookmarkButton";
 import { findAuthor } from "@/lib/authors";
 import { CATEGORIES, formatDate, SITE } from "@/lib/site";
-import { Share2, Clock, RefreshCw } from "lucide-react";
+import { Clock, RefreshCw } from "lucide-react";
 
 export default function PostPage() {
   const { slug } = useParams<{ slug: string }>();
