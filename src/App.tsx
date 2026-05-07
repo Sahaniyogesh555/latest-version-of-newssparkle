@@ -18,12 +18,10 @@ import EditorialPolicy from "./pages/EditorialPolicy.tsx";
 import Corrections from "./pages/Corrections.tsx";
 import Authors from "./pages/Authors.tsx";
 import AuthorPage from "./pages/AuthorPage.tsx";
-import { HelmetProvider } from "react-helmet-async";
 
 const queryClient = new QueryClient();
 
 const App = () => (
-  <HelmetProvider>
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
@@ -50,7 +48,6 @@ const App = () => (
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>
-  </HelmetProvider>
 );
 
 export default App;
