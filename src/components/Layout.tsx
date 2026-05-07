@@ -5,6 +5,7 @@ import { Footer } from "./Footer";
 import { CookieConsent } from "./CookieConsent";
 import { PushNotificationsPrompt } from "./PushNotificationsPrompt";
 import { BackToTop } from "./BackToTop";
+import { BreakingNewsAlerts } from "./BreakingNewsAlerts";
 import { SITE } from "@/lib/site";
 
 export function Layout({ children }: { children: ReactNode }) {
