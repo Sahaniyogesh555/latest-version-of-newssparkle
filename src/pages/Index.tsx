@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
@@ -7,15 +7,47 @@ import { SEO } from "@/components/SEO";
 import { CATEGORIES, SITE, formatDate } from "@/lib/site";
 import { Link } from "react-router-dom";
 
+const PAGE_SIZE = 12;
+
 export default function Index() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const sentinelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     supabase.from("posts").select("*").eq("status", "published")
-      .order("published_at", { ascending: false }).limit(30)
-      .then(({ data }) => { setPosts((data as Post[]) || []); setLoading(false); });
+      .order("published_at", { ascending: false }).range(0, PAGE_SIZE + 1)
+      .then(({ data }) => {
+        const list = (data as Post[]) || [];
+        setPosts(list);
+        setHasMore(list.length >= PAGE_SIZE + 2);
+        setLoading(false);
+      });
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    const from = posts.length;
+    const to = from + PAGE_SIZE - 1;
+    const { data } = await supabase.from("posts").select("*").eq("status", "published")
+      .order("published_at", { ascending: false }).range(from, to);
+    const next = (data as Post[]) || [];
+    setPosts(prev => [...prev, ...next]);
+    setHasMore(next.length === PAGE_SIZE);
+    setLoadingMore(false);
+  }, [posts.length, loadingMore, hasMore]);
+
+  useEffect(() => {
+    if (!sentinelRef.current || !hasMore || loading) return;
+    const obs = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) loadMore();
+    }, { rootMargin: "800px" });
+    obs.observe(sentinelRef.current);
+    return () => obs.disconnect();
+  }, [loadMore, hasMore, loading]);
 
   const hero = posts[0];
   const latest = posts.slice(1, 13);
