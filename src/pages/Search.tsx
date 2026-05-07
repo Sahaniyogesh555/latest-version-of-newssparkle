@@ -193,7 +193,7 @@ export default function Search() {
           <button className="px-5 py-3 bg-primary text-primary-foreground font-semibold">Search</button>
         </form>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
             Category
             <select
@@ -207,6 +207,19 @@ export default function Search() {
               ))}
             </select>
           </label>
+
+          <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
+            Author
+            <select
+              value={author}
+              onChange={e => updateParam("author", e.target.value)}
+              className="px-3 py-2 bg-background border border-border focus:border-primary focus:outline-none text-sm text-foreground normal-case tracking-normal"
+            >
+              <option value="all">All authors</option>
+              {authors.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </label>
+
 
           <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
             Published
