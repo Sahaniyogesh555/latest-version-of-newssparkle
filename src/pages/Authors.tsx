@@ -2,6 +2,7 @@ import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { SITE } from "@/lib/site";
 import { Link } from "react-router-dom";
+import { AUTHORS } from "@/lib/authors";
 
 const AUTHORS = [
   {
