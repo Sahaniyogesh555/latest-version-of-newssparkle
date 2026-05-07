@@ -50,7 +50,7 @@ export default function Index() {
   }, [loadMore, hasMore, loading]);
 
   const hero = posts[0];
-  const latest = posts.slice(1, 13);
+  const latest = posts.slice(1);
 
   const trendingTags = useMemo(() => {
     const counts = new Map<string, number>();
@@ -141,6 +141,15 @@ export default function Index() {
           <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-3">
             {latest.map(p => <PostCard key={p.id} post={p} />)}
           </div>
+          <div ref={sentinelRef} aria-hidden className="h-10" />
+          {loadingMore && (
+            <div className="mt-10 grid gap-12 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
+              {[...Array(3)].map((_, i) => <div key={i} className="h-72 bg-muted" />)}
+            </div>
+          )}
+          {!hasMore && latest.length > 0 && (
+            <p className="text-center text-byline text-sm uppercase tracking-wider mt-10">— End of feed —</p>
+          )}
         </section>
       )}
 
