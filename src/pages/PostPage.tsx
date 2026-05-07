@@ -193,6 +193,8 @@ export default function PostPage() {
               ))}
             </div>
           )}
+
+          <AuthorBio author={authorProfile} publishedAt={post.published_at} updatedAt={post.updated_at} readingMinutes={post.reading_minutes} />
         </div>
 
         {related.length > 0 && (
