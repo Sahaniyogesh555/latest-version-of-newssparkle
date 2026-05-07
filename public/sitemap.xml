@@ -3,4 +3,7 @@
   <sitemap>
     <loc>https://newssparkle.lovable.app/functions/v1/sitemap</loc>
   </sitemap>
+  <sitemap>
+    <loc>https://newssparkle.lovable.app/functions/v1/news-sitemap</loc>
+  </sitemap>
 </sitemapindex>
