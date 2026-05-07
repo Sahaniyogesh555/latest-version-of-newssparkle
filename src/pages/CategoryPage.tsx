@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams, Navigate, Link } from "react-router-dom";
+import { useParams, Navigate, Link, useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
@@ -8,12 +8,17 @@ import { SEO } from "@/components/SEO";
 import { CATEGORIES, SITE } from "@/lib/site";
 import { CATEGORY_FAQS } from "@/lib/categoryFaqs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { TrendingUp, ArrowRight } from "lucide-react";
+import { TrendingUp, ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+
+const PAGE_SIZE = 12;
 
 export default function CategoryPage() {
   const { slug } = useParams<{ slug: string }>();
+  const [searchParams] = useSearchParams();
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
   const cat = CATEGORIES.find(c => c.slug === slug);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [total, setTotal] = useState(0);
   const [trending, setTrending] = useState<Post[]>([]);
   const [otherPool, setOtherPool] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,20 +26,27 @@ export default function CategoryPage() {
   useEffect(() => {
     if (!slug) return;
     setLoading(true);
-    supabase.from("posts").select("*").eq("category_slug", slug).eq("status", "published")
-      .order("published_at", { ascending: false }).limit(60)
-      .then(({ data }) => { setPosts((data as Post[]) || []); setLoading(false); });
+    const from = (page - 1) * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+    supabase.from("posts").select("*", { count: "exact" }).eq("category_slug", slug).eq("status", "published")
+      .order("published_at", { ascending: false }).range(from, to)
+      .then(({ data, count }) => {
+        setPosts((data as Post[]) || []);
+        setTotal(count || 0);
+        setLoading(false);
+        if (page > 1) window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+      });
 
-    // Trending = most-viewed published posts site-wide, excluding the current category
     supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
       .order("views", { ascending: false }).limit(6)
       .then(({ data }) => setTrending((data as Post[]) || []));
 
-    // Wider pool for tag-based related-posts matching
     supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
       .order("published_at", { ascending: false }).limit(120)
       .then(({ data }) => setOtherPool((data as Post[]) || []));
-  }, [slug]);
+  }, [slug, page]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const relatedCats = useMemo(
     () => CATEGORIES.filter(c => c.slug !== slug),
