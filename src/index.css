@@ -104,7 +104,16 @@
 
   .dark { color-scheme: dark; }
   :root { color-scheme: light; }
-  .dark img:not([src*=".svg"]) { filter: brightness(0.92) contrast(1.02); }
+  .dark img:not([src*=".svg"]) { filter: brightness(0.95) contrast(1.03); }
+
+  /* Dark-mode typography & link contrast */
+  .dark body { -webkit-font-smoothing: antialiased; }
+  .dark .prose-article p,
+  .dark .prose-article li { @apply text-foreground/95; }
+  .dark .prose-article a { @apply text-accent decoration-accent/60 underline-offset-[3px] hover:decoration-accent; }
+  .dark .prose-article strong { color: hsl(0 0% 100%); }
+  .dark .prose-article blockquote { color: hsl(0 0% 100% / 0.95); }
+  .dark a:focus-visible { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background rounded-sm; }
 }
 
 @layer base {
