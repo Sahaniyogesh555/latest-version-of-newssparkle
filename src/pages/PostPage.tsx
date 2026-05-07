@@ -94,6 +94,7 @@ export default function PostPage() {
 
   return (
     <Layout>
+      <ReadingProgress />
       <SEO
         title={post.meta_title || post.title}
         description={post.meta_description}
@@ -117,8 +118,12 @@ export default function PostPage() {
             <h1 className="font-serif text-3xl sm:text-4xl md:text-5xl font-black leading-[1.1] tracking-tight text-headline">{post.title}</h1>
             <p className="mt-5 text-lg sm:text-xl text-foreground/80 leading-relaxed font-light">{post.excerpt}</p>
             <div className="mt-6 flex flex-wrap items-center gap-4 text-xs text-byline uppercase tracking-wider border-t border-border pt-4">
-              <span className="font-semibold text-headline">{post.author}</span>
+              <Link to={`/author/${authorProfile.slug}`} className="flex items-center gap-2 hover:text-primary">
+                <img src={authorProfile.image} alt="" width={28} height={28} loading="lazy" decoding="async" className="size-7 rounded-full bg-muted object-cover" />
+                <span className="font-semibold text-headline normal-case tracking-normal">{authorProfile.name}</span>
+              </Link>
               <span>{formatDate(post.published_at)}</span>
+              {wasUpdated && <span className="flex items-center gap-1 text-primary"><RefreshCw className="size-3" /> Updated {formatDate(post.updated_at)}</span>}
               <span className="flex items-center gap-1"><Clock className="size-3" /> {post.reading_minutes} min read</span>
               <button onClick={() => navigator.share?.({ title: post.title, url: window.location.href }).catch(()=>{})} className="ml-auto flex items-center gap-1 hover:text-primary"><Share2 className="size-3" /> Share</button>
             </div>
@@ -128,7 +133,7 @@ export default function PostPage() {
         {post.featured_image_url && (
           <div className="container-prose mt-8">
             <figure>
-              <img src={post.featured_image_url} alt={post.featured_image_alt || post.title} className="w-full aspect-[16/9] object-cover" />
+              <img src={post.featured_image_url} alt={post.featured_image_alt || post.title} loading="eager" decoding="async" fetchPriority="high" className="w-full aspect-[16/9] object-cover" />
               {post.featured_image_alt && <figcaption className="mt-2 text-xs text-byline italic">{post.featured_image_alt}</figcaption>}
             </figure>
           </div>
