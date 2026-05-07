@@ -7,8 +7,11 @@ import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
+import { ReadingProgress } from "@/components/ReadingProgress";
+import { AuthorBio } from "@/components/AuthorBio";
+import { findAuthor } from "@/lib/authors";
 import { CATEGORIES, formatDate, SITE } from "@/lib/site";
-import { Share2, Clock } from "lucide-react";
+import { Share2, Clock, RefreshCw } from "lucide-react";
 
 export default function PostPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -39,6 +42,8 @@ export default function PostPage() {
   if (loading || !post) return <Layout><div className="container-prose py-20 animate-pulse space-y-4"><div className="h-12 bg-muted" /><div className="h-72 bg-muted" /></div></Layout>;
 
   const cat = CATEGORIES.find(c => c.slug === post.category_slug);
+  const authorProfile = findAuthor(post.author);
+  const wasUpdated = post.updated_at && post.updated_at !== post.published_at;
 
   const url = `${SITE.url}/post/${post.slug}`;
   const wordCount = post.content ? post.content.trim().split(/\s+/).length : undefined;
@@ -51,7 +56,7 @@ export default function PostPage() {
     image: post.featured_image_url ? [post.featured_image_url] : undefined,
     datePublished: post.published_at,
     dateModified: post.updated_at || post.published_at,
-    author: [{ "@type": "Person", name: post.author }],
+    author: [{ "@type": "Person", name: authorProfile.name, url: `${SITE.url}/author/${authorProfile.slug}`, image: authorProfile.image, jobTitle: authorProfile.role }],
     publisher: {
       "@type": "Organization",
       name: SITE.name,
@@ -89,6 +94,7 @@ export default function PostPage() {
 
   return (
     <Layout>
+      <ReadingProgress />
       <SEO
         title={post.meta_title || post.title}
         description={post.meta_description}
@@ -112,8 +118,12 @@ export default function PostPage() {
             <h1 className="font-serif text-3xl sm:text-4xl md:text-5xl font-black leading-[1.1] tracking-tight text-headline">{post.title}</h1>
             <p className="mt-5 text-lg sm:text-xl text-foreground/80 leading-relaxed font-light">{post.excerpt}</p>
             <div className="mt-6 flex flex-wrap items-center gap-4 text-xs text-byline uppercase tracking-wider border-t border-border pt-4">
-              <span className="font-semibold text-headline">{post.author}</span>
+              <Link to={`/author/${authorProfile.slug}`} className="flex items-center gap-2 hover:text-primary">
+                <img src={authorProfile.image} alt="" width={28} height={28} loading="lazy" decoding="async" className="size-7 rounded-full bg-muted object-cover" />
+                <span className="font-semibold text-headline normal-case tracking-normal">{authorProfile.name}</span>
+              </Link>
               <span>{formatDate(post.published_at)}</span>
+              {wasUpdated && <span className="flex items-center gap-1 text-primary"><RefreshCw className="size-3" /> Updated {formatDate(post.updated_at)}</span>}
               <span className="flex items-center gap-1"><Clock className="size-3" /> {post.reading_minutes} min read</span>
               <button onClick={() => navigator.share?.({ title: post.title, url: window.location.href }).catch(()=>{})} className="ml-auto flex items-center gap-1 hover:text-primary"><Share2 className="size-3" /> Share</button>
             </div>
@@ -123,7 +133,7 @@ export default function PostPage() {
         {post.featured_image_url && (
           <div className="container-prose mt-8">
             <figure>
-              <img src={post.featured_image_url} alt={post.featured_image_alt || post.title} className="w-full aspect-[16/9] object-cover" />
+              <img src={post.featured_image_url} alt={post.featured_image_alt || post.title} loading="eager" decoding="async" fetchPriority="high" className="w-full aspect-[16/9] object-cover" />
               {post.featured_image_alt && <figcaption className="mt-2 text-xs text-byline italic">{post.featured_image_alt}</figcaption>}
             </figure>
           </div>
@@ -183,6 +193,8 @@ export default function PostPage() {
               ))}
             </div>
           )}
+
+          <AuthorBio author={authorProfile} publishedAt={post.published_at} updatedAt={post.updated_at} readingMinutes={post.reading_minutes} />
         </div>
 
         {related.length > 0 && (

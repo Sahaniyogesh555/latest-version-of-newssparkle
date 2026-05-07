@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams, Navigate, Link } from "react-router-dom";
+import { useParams, Navigate, Link, useSearchParams } from "react-router-dom";
+import { Helmet } from "react-helmet-async";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
@@ -8,12 +9,17 @@ import { SEO } from "@/components/SEO";
 import { CATEGORIES, SITE } from "@/lib/site";
 import { CATEGORY_FAQS } from "@/lib/categoryFaqs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { TrendingUp, ArrowRight } from "lucide-react";
+import { TrendingUp, ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+
+const PAGE_SIZE = 12;
 
 export default function CategoryPage() {
   const { slug } = useParams<{ slug: string }>();
+  const [searchParams] = useSearchParams();
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
   const cat = CATEGORIES.find(c => c.slug === slug);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [total, setTotal] = useState(0);
   const [trending, setTrending] = useState<Post[]>([]);
   const [otherPool, setOtherPool] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,20 +27,27 @@ export default function CategoryPage() {
   useEffect(() => {
     if (!slug) return;
     setLoading(true);
-    supabase.from("posts").select("*").eq("category_slug", slug).eq("status", "published")
-      .order("published_at", { ascending: false }).limit(60)
-      .then(({ data }) => { setPosts((data as Post[]) || []); setLoading(false); });
+    const from = (page - 1) * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+    supabase.from("posts").select("*", { count: "exact" }).eq("category_slug", slug).eq("status", "published")
+      .order("published_at", { ascending: false }).range(from, to)
+      .then(({ data, count }) => {
+        setPosts((data as Post[]) || []);
+        setTotal(count || 0);
+        setLoading(false);
+        if (page > 1) window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+      });
 
-    // Trending = most-viewed published posts site-wide, excluding the current category
     supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
       .order("views", { ascending: false }).limit(6)
       .then(({ data }) => setTrending((data as Post[]) || []));
 
-    // Wider pool for tag-based related-posts matching
     supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
       .order("published_at", { ascending: false }).limit(120)
       .then(({ data }) => setOtherPool((data as Post[]) || []));
-  }, [slug]);
+  }, [slug, page]);
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const relatedCats = useMemo(
     () => CATEGORIES.filter(c => c.slug !== slug),
@@ -160,14 +173,25 @@ export default function CategoryPage() {
 
   const jsonLd = faqLd ? [collectionLd, faqLd] : collectionLd;
 
+  const pageSuffix = page > 1 ? ` — Page ${page}` : "";
+  const canonicalPath = page > 1 ? `/category/${cat.slug}?page=${page}` : `/category/${cat.slug}`;
+  const prevHref = page > 2 ? `${SITE.url}/category/${cat.slug}?page=${page - 1}` : page === 2 ? `${SITE.url}/category/${cat.slug}` : undefined;
+  const nextHref = page < totalPages ? `${SITE.url}/category/${cat.slug}?page=${page + 1}` : undefined;
+
   return (
     <Layout>
       <SEO
-        title={`${cat.name} News & Analysis`}
+        title={`${cat.name} News & Analysis${pageSuffix}`}
         description={description}
-        path={`/category/${cat.slug}`}
+        path={canonicalPath}
         jsonLd={jsonLd}
       />
+      {(prevHref || nextHref) && (
+        <Helmet>
+          {prevHref && <link rel="prev" href={prevHref} />}
+          {nextHref && <link rel="next" href={nextHref} />}
+        </Helmet>
+      )}
       <section className="border-b border-rule bg-secondary/30">
         <div className="container-wide py-12">
           <nav aria-label="Breadcrumb" className="text-xs text-byline uppercase tracking-wider mb-4">
@@ -176,7 +200,7 @@ export default function CategoryPage() {
             <span style={{ color: `hsl(var(--${cat.color}))` }}>{cat.name}</span>
           </nav>
           <span className="kicker" style={{ color: `hsl(var(--${cat.color}))` }}>Section</span>
-          <h1 className="headline-hero mt-2">{cat.name}</h1>
+          <h1 className="headline-hero mt-2">{cat.name}{pageSuffix}</h1>
           <p className="mt-4 max-w-2xl text-lg text-foreground/80">
             In-depth {cat.name.toLowerCase()} reporting, analysis and live updates from around the world.
           </p>
@@ -201,10 +225,38 @@ export default function CategoryPage() {
           </div>
         ) : (
           <>
-            {posts[0] && <div className="mb-12 pb-12 border-b border-border"><PostCard post={posts[0]} variant="hero" /></div>}
+            {page === 1 && posts[0] && <div className="mb-12 pb-12 border-b border-border"><PostCard post={posts[0]} variant="hero" /></div>}
             <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3">
-              {posts.slice(1).map(p => <PostCard key={p.id} post={p} />)}
+              {(page === 1 ? posts.slice(1) : posts).map(p => <PostCard key={p.id} post={p} />)}
             </div>
+            {totalPages > 1 && (
+              <nav aria-label="Pagination" className="mt-12 flex items-center justify-center gap-2">
+                {page > 1 && (
+                  <Link to={`/category/${cat.slug}${page - 1 > 1 ? `?page=${page - 1}` : ""}`} className="flex items-center gap-1 px-4 py-2 border border-border hover:border-primary hover:text-primary text-sm" rel="prev">
+                    <ChevronLeft className="size-4" /> Prev
+                  </Link>
+                )}
+                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                  .filter(n => n === 1 || n === totalPages || Math.abs(n - page) <= 1)
+                  .map((n, idx, arr) => (
+                    <span key={n} className="flex items-center">
+                      {idx > 0 && arr[idx - 1] !== n - 1 && <span className="px-2 text-byline">…</span>}
+                      <Link
+                        to={`/category/${cat.slug}${n > 1 ? `?page=${n}` : ""}`}
+                        aria-current={n === page ? "page" : undefined}
+                        className={`px-3.5 py-2 border text-sm ${n === page ? "bg-primary text-primary-foreground border-primary" : "border-border hover:border-primary hover:text-primary"}`}
+                      >
+                        {n}
+                      </Link>
+                    </span>
+                  ))}
+                {page < totalPages && (
+                  <Link to={`/category/${cat.slug}?page=${page + 1}`} className="flex items-center gap-1 px-4 py-2 border border-border hover:border-primary hover:text-primary text-sm" rel="next">
+                    Next <ChevronRight className="size-4" />
+                  </Link>
+                )}
+              </nav>
+            )}
           </>
         )}
       </div>

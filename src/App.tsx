@@ -17,6 +17,7 @@ import Brand from "./pages/Brand.tsx";
 import EditorialPolicy from "./pages/EditorialPolicy.tsx";
 import Corrections from "./pages/Corrections.tsx";
 import Authors from "./pages/Authors.tsx";
+import AuthorPage from "./pages/AuthorPage.tsx";
 
 const queryClient = new QueryClient();
 
@@ -41,6 +42,7 @@ const App = () => (
           <Route path="/editorial-policy" element={<EditorialPolicy />} />
           <Route path="/corrections" element={<Corrections />} />
           <Route path="/authors" element={<Authors />} />
+          <Route path="/author/:slug" element={<AuthorPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
