@@ -60,17 +60,32 @@ export default function Search() {
   useEffect(() => {
     supabase.from("categories").select("slug,name").order("name")
       .then(({ data }) => setCategories((data as Category[]) || []));
+
+    supabase.from("posts").select("author").eq("status", "published").limit(1000)
+      .then(({ data }) => {
+        const set = new Set<string>();
+        (data as { author: string }[] | null)?.forEach(r => r.author && set.add(r.author));
+        AUTHORS.forEach(a => set.add(a.name));
+        setAuthors(Array.from(set).sort((a, b) => a.localeCompare(b)));
+      });
   }, []);
 
   useEffect(() => {
-    if (!q) { setResults([]); return; }
+    if (!q && category === "all" && range === "any" && author === "all" && selectedTags.length === 0) {
+      setResults([]); return;
+    }
     setLoading(true);
-    const term = q.replace(/[%_]/g, "\\$&");
 
-    let query = supabase.from("posts").select("*").eq("status", "published")
-      .or(`title.ilike.%${term}%,excerpt.ilike.%${term}%,content.ilike.%${term}%`);
+    let query = supabase.from("posts").select("*").eq("status", "published");
+
+    if (q) {
+      const term = q.replace(/[%_]/g, "\\$&");
+      query = query.or(`title.ilike.%${term}%,excerpt.ilike.%${term}%,content.ilike.%${term}%`);
+    }
 
     if (category !== "all") query = query.eq("category_slug", category);
+    if (author !== "all") query = query.eq("author", author);
+    if (selectedTags.length > 0) query = query.contains("keywords", selectedTags);
 
     if (range === "custom") {
       if (fromDate) query = query.gte("published_at", new Date(fromDate).toISOString());
@@ -92,7 +107,7 @@ export default function Search() {
       setResults((data as Post[]) || []);
       setLoading(false);
     });
-  }, [q, category, range, fromDate, toDate, sort]);
+  }, [q, category, range, fromDate, toDate, sort, author, tagsParam, selectedTags]);
 
   const updateParam = (key: string, value: string) => {
     const next = new URLSearchParams(params);
