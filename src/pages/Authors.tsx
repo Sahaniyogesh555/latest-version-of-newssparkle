@@ -4,50 +4,6 @@ import { SITE } from "@/lib/site";
 import { Link } from "react-router-dom";
 import { AUTHORS } from "@/lib/authors";
 
-const AUTHORS = [
-  {
-    name: "NewsSparkle Editorial Desk",
-    role: "Lead Newsroom",
-    beat: "Breaking news, daily briefings, story coordination",
-    bio:
-      "The central editorial desk that coordinates daily coverage, sets the news agenda, and signs off on every story before publication. The desk operates under our published Editorial Policy and reports to the Editor-in-Chief.",
-  },
-  {
-    name: "Politics & Policy Desk",
-    role: "Senior Reporters",
-    beat: "Government, elections, public policy, international affairs",
-    bio:
-      "Covers legislative developments, electoral politics, executive actions and global diplomacy. Sources draw from official records, court filings and on-the-record interviews with policy makers.",
-  },
-  {
-    name: "Business & Markets Desk",
-    role: "Senior Analysts",
-    beat: "Economy, markets, corporate news, jobs",
-    bio:
-      "Tracks listed-company filings, central-bank communications and macro indicators. Specialises in turning raw market data into clear, contextual reporting for non-specialist readers.",
-  },
-  {
-    name: "Technology & AI Desk",
-    role: "Specialist Reporters",
-    beat: "Software, AI research, product launches, cyber-security",
-    bio:
-      "Reports on the products, papers and platform shifts shaping the technology industry. Cross-references vendor announcements with independent benchmarks and primary research.",
-  },
-  {
-    name: "Health & Lifestyle Desk",
-    role: "Health Reporters",
-    beat: "Medicine, public health, fitness, nutrition, wellbeing",
-    bio:
-      "Sources stories from peer-reviewed journals, public-health authorities and credentialed clinicians. Avoids unsubstantiated medical claims; flags ongoing research as preliminary where appropriate.",
-  },
-  {
-    name: "Entertainment & Culture Desk",
-    role: "Culture Writers",
-    beat: "Film, television, music, viral trends, celebrity",
-    bio:
-      "Covers the cultural moments that shape conversation. Distinguishes confirmed news from rumour and labels opinion content explicitly.",
-  },
-];
 
 export default function Authors() {
   const orgLd = {
