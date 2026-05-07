@@ -41,11 +41,19 @@ export default function Search() {
   const fromDate = params.get("from") || "";
   const toDate = params.get("to") || "";
   const sort = (params.get("sort") as SortBy) || "newest";
+  const author = params.get("author") || "all";
+  const tagsParam = params.get("tags") || "";
+  const selectedTags = useMemo(
+    () => tagsParam.split(",").map(t => t.trim()).filter(Boolean),
+    [tagsParam],
+  );
 
   const [input, setInput] = useState(q);
+  const [tagInput, setTagInput] = useState("");
   const [results, setResults] = useState<Post[]>([]);
   const [loading, setLoading] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [authors, setAuthors] = useState<string[]>([]);
 
   useEffect(() => { setInput(q); }, [q]);
 
