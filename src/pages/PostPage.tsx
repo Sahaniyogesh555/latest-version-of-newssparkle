@@ -11,14 +11,16 @@ import { ReadingProgress } from "@/components/ReadingProgress";
 import { AuthorBio } from "@/components/AuthorBio";
 import { ShareBar } from "@/components/ShareBar";
 import { BookmarkButton } from "@/components/BookmarkButton";
+import { TableOfContents } from "@/components/TableOfContents";
 import { findAuthor } from "@/lib/authors";
 import { CATEGORIES, formatDate, SITE } from "@/lib/site";
-import { Clock, RefreshCw } from "lucide-react";
+import { Clock, RefreshCw, ChevronRight } from "lucide-react";
 
 export default function PostPage() {
   const { slug } = useParams<{ slug: string }>();
   const [post, setPost] = useState<Post | null>(null);
   const [related, setRelated] = useState<Post[]>([]);
+  const [recommended, setRecommended] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
@@ -29,13 +31,19 @@ export default function PostPage() {
     (async () => {
       const { data } = await supabase.from("posts").select("*").eq("slug", slug).eq("status", "published").maybeSingle();
       if (!data) { setNotFound(true); setLoading(false); return; }
-      setPost(data as Post);
+      const p = data as Post;
+      setPost(p);
       setLoading(false);
       supabase.rpc("increment_post_views", { post_slug: slug });
-      const { data: rel } = await supabase.from("posts").select("*")
-        .eq("category_slug", (data as Post).category_slug).eq("status", "published")
-        .neq("id", (data as Post).id).order("published_at", { ascending: false }).limit(3);
+      const [{ data: rel }, { data: rec }] = await Promise.all([
+        supabase.from("posts").select("*").eq("category_slug", p.category_slug).eq("status", "published")
+          .neq("id", p.id).order("published_at", { ascending: false }).limit(3),
+        supabase.from("posts").select("*").eq("status", "published")
+          .neq("id", p.id).neq("category_slug", p.category_slug)
+          .order("views", { ascending: false }).limit(4),
+      ]);
       setRelated((rel as Post[]) || []);
+      setRecommended((rec as Post[]) || []);
       window.scrollTo(0, 0);
     })();
   }, [slug]);
@@ -59,11 +67,7 @@ export default function PostPage() {
     datePublished: post.published_at,
     dateModified: post.updated_at || post.published_at,
     author: [{ "@type": "Person", name: authorProfile.name, url: `${SITE.url}/author/${authorProfile.slug}`, image: authorProfile.image, jobTitle: authorProfile.role }],
-    publisher: {
-      "@type": "Organization",
-      name: SITE.name,
-      logo: { "@type": "ImageObject", url: `${SITE.url}/logo.png` },
-    },
+    publisher: { "@type": "Organization", name: SITE.name, logo: { "@type": "ImageObject", url: `${SITE.url}/logo.png` } },
     mainEntityOfPage: { "@type": "WebPage", "@id": url },
     articleSection: cat?.name,
     keywords: (post.keywords || []).join(", "),
@@ -86,8 +90,7 @@ export default function PostPage() {
     "@context": "https://schema.org",
     "@type": "FAQPage",
     mainEntity: post.faq.map(f => ({
-      "@type": "Question",
-      name: f.q,
+      "@type": "Question", name: f.q,
       acceptedAnswer: { "@type": "Answer", text: f.a },
     })),
   } : undefined;
@@ -112,104 +115,174 @@ export default function PostPage() {
       />
 
       <article>
-        <header className="bg-secondary/30 border-b border-border">
-          <div className="container-prose py-10 sm:py-14">
-            <div className="text-xs text-byline uppercase tracking-wider mb-4">
-              <Link to="/" className="hover:text-primary">Home</Link> · {cat && <Link to={`/category/${cat.slug}`} className="hover:text-primary" style={{ color: `hsl(var(--${cat.color}))` }}>{cat.name}</Link>}
-            </div>
-            <h1 className="font-serif text-3xl sm:text-4xl md:text-5xl font-black leading-[1.1] tracking-tight text-headline">{post.title}</h1>
+        {/* Breadcrumbs */}
+        <nav aria-label="Breadcrumb" className="border-b border-border bg-secondary/30">
+          <ol className="container-wide py-3 flex items-center gap-1.5 text-xs text-byline overflow-x-auto whitespace-nowrap">
+            <li><Link to="/" className="hover:text-primary">Home</Link></li>
+            <ChevronRight className="size-3 shrink-0" />
+            {cat && <>
+              <li><Link to={`/category/${cat.slug}`} className="hover:text-primary uppercase tracking-wider font-medium" style={{ color: `hsl(var(--${cat.color}))` }}>{cat.name}</Link></li>
+              <ChevronRight className="size-3 shrink-0" />
+            </>}
+            <li className="text-headline font-medium truncate max-w-[60vw]">{post.title}</li>
+          </ol>
+        </nav>
+
+        {/* Title block */}
+        <header className="container-wide pt-8 sm:pt-12 pb-6 sm:pb-8 border-b border-border">
+          <div className="max-w-3xl mx-auto">
+            {cat && <span className="kicker" style={{ color: `hsl(var(--${cat.color}))` }}>{cat.name}</span>}
+            <h1 className="font-serif text-3xl sm:text-4xl md:text-5xl font-black leading-[1.08] tracking-tight text-headline mt-3">{post.title}</h1>
             <p className="mt-5 text-lg sm:text-xl text-foreground/80 leading-relaxed font-light">{post.excerpt}</p>
-            <div className="mt-6 flex flex-wrap items-center gap-4 text-xs text-byline uppercase tracking-wider border-t border-border pt-4">
+            <div className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-3 text-xs text-byline uppercase tracking-wider">
               <Link to={`/author/${authorProfile.slug}`} className="flex items-center gap-2 hover:text-primary">
-                <img src={authorProfile.image} alt="" width={28} height={28} loading="lazy" decoding="async" className="size-7 rounded-full bg-muted object-cover" />
-                <span className="font-semibold text-headline normal-case tracking-normal">{authorProfile.name}</span>
+                <img src={authorProfile.image} alt="" width={32} height={32} loading="lazy" decoding="async" className="size-8 rounded-full bg-muted object-cover" />
+                <span className="font-semibold text-headline normal-case tracking-normal text-sm">{authorProfile.name}</span>
               </Link>
+              <span className="size-1 rounded-full bg-border" />
               <span>{formatDate(post.published_at)}</span>
-              {wasUpdated && <span className="flex items-center gap-1 text-primary"><RefreshCw className="size-3" /> Updated {formatDate(post.updated_at)}</span>}
+              {wasUpdated && <><span className="size-1 rounded-full bg-border" /><span className="flex items-center gap-1 text-primary"><RefreshCw className="size-3" /> Updated {formatDate(post.updated_at)}</span></>}
+              <span className="size-1 rounded-full bg-border" />
               <span className="flex items-center gap-1"><Clock className="size-3" /> {post.reading_minutes} min read</span>
-              <span className="ml-auto flex items-center gap-3">
+              <span className="ml-auto flex items-center gap-3 normal-case tracking-normal">
                 <BookmarkButton post={{ slug: post.slug, title: post.title, excerpt: post.excerpt, category_slug: post.category_slug, featured_image_url: post.featured_image_url, published_at: post.published_at }} showLabel />
               </span>
-            </div>
-            <div className="mt-4">
-              <ShareBar url={url} title={post.title} />
             </div>
           </div>
         </header>
 
+        {/* Featured image */}
         {post.featured_image_url && (
-          <div className="container-prose mt-8">
-            <figure>
-              <img src={post.featured_image_url} alt={post.featured_image_alt || post.title} loading="eager" decoding="async" fetchPriority="high" className="w-full aspect-[16/9] object-cover" />
-              {post.featured_image_alt && <figcaption className="mt-2 text-xs text-byline italic">{post.featured_image_alt}</figcaption>}
+          <div className="container-wide mt-6 sm:mt-8">
+            <figure className="max-w-5xl mx-auto">
+              <img src={post.featured_image_url} alt={post.featured_image_alt || post.title}
+                loading="eager" decoding="async" fetchPriority="high"
+                className="w-full aspect-[16/9] object-cover" />
+              {post.featured_image_alt && <figcaption className="mt-2 text-xs text-byline italic text-center">{post.featured_image_alt}</figcaption>}
             </figure>
           </div>
         )}
 
-        <div className="container-prose py-10">
-          <div className="ad-slot mb-10" data-ad-slot="article-top">Advertisement</div>
-
-          <div className="prose-article">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ href, children, ...props }) => {
-                  const isExternal = href && /^https?:\/\//i.test(href) && !href.includes(new URL(SITE.url).hostname);
-                  return isExternal ? (
-                    <a href={href} target="_blank" rel="noopener noreferrer nofollow" {...props}>{children}</a>
-                  ) : (
-                    <a href={href} {...props}>{children}</a>
-                  );
-                },
-                img: ({ src, alt, ...props }) => (
-                  <img src={src} alt={alt || post.title} loading="lazy" {...props} />
-                ),
-              }}
-            >{post.content}</ReactMarkdown>
-          </div>
-
-          {post.key_takeaways && post.key_takeaways.length > 0 && (
-            <aside className="mt-10 p-6 bg-secondary border-l-4 border-primary">
-              <h2 className="font-serif text-xl font-bold mb-3">Key Takeaways</h2>
-              <ul className="space-y-2 text-foreground/90">
-                {post.key_takeaways.map((t, i) => <li key={i} className="flex gap-3"><span className="text-primary font-bold">›</span><span>{t}</span></li>)}
-              </ul>
-            </aside>
-          )}
-
-          <div className="ad-slot my-10" data-ad-slot="article-bottom">Advertisement</div>
-
-          {post.faq && post.faq.length > 0 && (
-            <section className="mt-10">
-              <div className="rule-top mb-5"><h2 className="font-serif text-2xl font-bold">Frequently Asked Questions</h2></div>
-              <div className="space-y-5">
-                {post.faq.map((f, i) => (
-                  <div key={i}>
-                    <h3 className="font-serif text-lg font-semibold text-headline">{f.q}</h3>
-                    <p className="mt-2 text-foreground/85 leading-relaxed">{f.a}</p>
-                  </div>
-                ))}
+        {/* 3-column body: TOC | content | share rail */}
+        <div className="container-wide py-10 sm:py-14">
+          <div className="grid lg:grid-cols-[200px_minmax(0,1fr)_60px] xl:grid-cols-[240px_minmax(0,1fr)_80px] gap-8 lg:gap-12">
+            {/* Left: TOC */}
+            <aside className="hidden lg:block">
+              <div className="sticky top-24">
+                <TableOfContents content={post.content} />
               </div>
-            </section>
-          )}
+            </aside>
 
-          {post.keywords && post.keywords.length > 0 && (
-            <div className="mt-10 pt-6 border-t border-border flex flex-wrap gap-2">
-              {post.keywords.map(k => (
-                <Link key={k} to={`/tag/${encodeURIComponent(k)}`} className="text-xs uppercase tracking-wider bg-muted px-2.5 py-1 text-byline hover:bg-primary hover:text-primary-foreground transition-colors">{k}</Link>
-              ))}
+            {/* Center: article body */}
+            <div className="max-w-3xl mx-auto w-full">
+              {/* Mobile share */}
+              <div className="lg:hidden mb-6"><ShareBar url={url} title={post.title} /></div>
+
+              <div className="ad-slot mb-10" data-ad-slot="article-top">Advertisement</div>
+
+              <div className="prose-article">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    a: ({ href, children, ...props }) => {
+                      const isExternal = href && /^https?:\/\//i.test(href) && !href.includes(new URL(SITE.url).hostname);
+                      return isExternal
+                        ? <a href={href} target="_blank" rel="noopener noreferrer nofollow" {...props}>{children}</a>
+                        : <a href={href} {...props}>{children}</a>;
+                    },
+                    img: ({ src, alt, ...props }) => (
+                      <img src={src} alt={alt || post.title} loading="lazy" {...props} />
+                    ),
+                  }}
+                >{post.content}</ReactMarkdown>
+              </div>
+
+              {post.key_takeaways && post.key_takeaways.length > 0 && (
+                <aside className="mt-10 p-6 bg-secondary/60 border-l-4 border-primary">
+                  <h2 className="font-serif text-xl font-bold mb-3">Key Takeaways</h2>
+                  <ul className="space-y-2 text-foreground/90">
+                    {post.key_takeaways.map((t, i) => <li key={i} className="flex gap-3"><span className="text-primary font-bold">›</span><span>{t}</span></li>)}
+                  </ul>
+                </aside>
+              )}
+
+              <div className="ad-slot my-10" data-ad-slot="article-bottom">Advertisement</div>
+
+              {post.faq && post.faq.length > 0 && (
+                <section className="mt-10">
+                  <div className="rule-top mb-5"><h2 className="font-serif text-2xl font-bold">Frequently Asked Questions</h2></div>
+                  <div className="space-y-5">
+                    {post.faq.map((f, i) => (
+                      <details key={i} className="group border-b border-border pb-4">
+                        <summary className="flex items-start justify-between gap-3 cursor-pointer list-none">
+                          <h3 className="font-serif text-lg font-semibold text-headline group-hover:text-primary transition-colors">{f.q}</h3>
+                          <span className="text-primary font-bold text-xl shrink-0 group-open:rotate-45 transition-transform">+</span>
+                        </summary>
+                        <p className="mt-3 text-foreground/85 leading-relaxed">{f.a}</p>
+                      </details>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {post.keywords && post.keywords.length > 0 && (
+                <div className="mt-10 pt-6 border-t border-border">
+                  <div className="kicker text-byline mb-3">Tags</div>
+                  <div className="flex flex-wrap gap-2">
+                    {post.keywords.map(k => (
+                      <Link key={k} to={`/tag/${encodeURIComponent(k)}`}
+                        className="text-xs uppercase tracking-wider bg-muted px-2.5 py-1 text-byline hover:bg-primary hover:text-primary-foreground transition-colors">
+                        {k}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Share again at bottom */}
+              <div className="mt-8 pt-6 border-t border-border flex items-center gap-4">
+                <span className="kicker text-byline">Share this story</span>
+                <ShareBar url={url} title={post.title} />
+              </div>
+
+              <AuthorBio author={authorProfile} publishedAt={post.published_at} updatedAt={post.updated_at} readingMinutes={post.reading_minutes} />
             </div>
-          )}
 
-          <AuthorBio author={authorProfile} publishedAt={post.published_at} updatedAt={post.updated_at} readingMinutes={post.reading_minutes} />
+            {/* Right: sticky share rail */}
+            <aside className="hidden lg:block">
+              <div className="sticky top-24 flex flex-col items-center gap-3">
+                <span className="kicker text-byline writing-vertical text-[10px]">Share</span>
+                <ShareBar url={url} title={post.title} />
+              </div>
+            </aside>
+          </div>
         </div>
 
+        {/* Related */}
         {related.length > 0 && (
-          <section className="bg-secondary/30 border-t border-rule">
+          <section className="bg-secondary/30 border-t border-border">
             <div className="container-wide py-12">
-              <div className="rule-top mb-6"><h2 className="font-serif text-2xl font-bold">More from {cat?.name}</h2></div>
+              <div className="flex items-end justify-between mb-6 pb-3 border-b border-border">
+                <h2 className="font-serif text-2xl font-bold">More from {cat?.name}</h2>
+                {cat && <Link to={`/category/${cat.slug}`} className="text-xs uppercase tracking-wider font-semibold text-byline hover:text-primary">View all →</Link>}
+              </div>
               <div className="grid gap-10 md:grid-cols-3">
                 {related.map(r => <PostCard key={r.id} post={r} />)}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Recommended cross-category */}
+        {recommended.length > 0 && (
+          <section className="border-t border-border">
+            <div className="container-wide py-12">
+              <div className="flex items-end justify-between mb-6 pb-3 border-b border-border">
+                <h2 className="font-serif text-2xl font-bold">Recommended for you</h2>
+                <span className="kicker text-byline">Trending across the site</span>
+              </div>
+              <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
+                {recommended.map(r => <PostCard key={r.id} post={r} />)}
               </div>
             </div>
           </section>
