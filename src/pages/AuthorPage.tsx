@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
+import { AuthorImage } from "@/components/AuthorImage";
 import { findAuthorBySlug } from "@/lib/authors";
 import { Post } from "@/lib/types";
 import { SITE } from "@/lib/site";
@@ -62,12 +63,10 @@ export default function AuthorPage() {
           <span>{author.name}</span>
         </nav>
         <header className="flex flex-col sm:flex-row gap-6 items-start sm:items-center">
-          <img
-            src={author.image}
-            alt={`${author.name} avatar`}
-            width={120}
-            height={120}
-            className="size-[120px] rounded-full bg-muted object-cover ring-1 ring-border shrink-0"
+          <AuthorImage
+            author={author}
+            size="xl"
+            className="ring-2 shrink-0"
           />
           <div>
             <span className="kicker text-primary">{author.role}</span>

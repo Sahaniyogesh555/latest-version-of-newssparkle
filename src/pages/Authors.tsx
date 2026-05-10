@@ -3,6 +3,7 @@ import { SEO } from "@/components/SEO";
 import { SITE } from "@/lib/site";
 import { Link } from "react-router-dom";
 import { AUTHORS } from "@/lib/authors";
+import { AuthorImage } from "@/components/AuthorImage";
 
 
 export default function Authors() {
@@ -45,7 +46,11 @@ export default function Authors() {
         <div className="mt-12 grid gap-6 md:grid-cols-2">
           {AUTHORS.map(a => (
             <Link key={a.slug} to={`/author/${a.slug}`} className="group flex gap-4 border border-border p-6 bg-background hover:border-primary transition-colors">
-              <img src={a.image} alt={`${a.name} avatar`} width={64} height={64} loading="lazy" decoding="async" className="size-16 rounded-full bg-muted object-cover shrink-0 ring-1 ring-border" />
+              <AuthorImage
+                author={a}
+                size="lg"
+                className="shrink-0"
+              />
               <div>
                 <div className="kicker text-byline">{a.role}</div>
                 <h2 className="font-serif text-xl font-bold text-headline mt-1 group-hover:text-primary transition-colors">{a.name}</h2>

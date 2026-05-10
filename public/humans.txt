@@ -1,0 +1,24 @@
+/* TEAM */
+Editor-in-Chief: NewsSparkle Editorial Desk
+Lead Editor: Digital Newsroom
+Reports: News, Business, Tech, Health, Entertainment
+Contact: editorial@newssparkle.lovable.app
+Location: Global news desk
+
+/* SITE */
+Last update: 2026-05-09
+Language: English
+Formats: HTML5, CSS3, ES2024
+Components: React, TypeScript, Tailwind CSS
+Hosting: Lovable
+Database: Supabase
+
+/* DESIGN */
+Typography: Fraunces, Inter
+Brand: modern editorial, high-contrast, readable
+UX: mobile-first, editorial-dense, trust-first
+
+/* POLICY */
+NewsSparkle follows transparent sourcing, correction notices, and editorial accountability.
+Report issues to editorial@newssparkle.lovable.app.
+All published content is reviewed and fact-checked before posting.

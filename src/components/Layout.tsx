@@ -6,6 +6,7 @@ import { CookieConsent } from "./CookieConsent";
 import { PushNotificationsPrompt } from "./PushNotificationsPrompt";
 import { BackToTop } from "./BackToTop";
 import { BreakingNewsAlerts } from "./BreakingNewsAlerts";
+import { MobileBottomNav } from "./MobileBottomNav";
 import { SITE } from "@/lib/site";
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -23,8 +24,9 @@ export function Layout({ children }: { children: ReactNode }) {
         <script type="application/ld+json">{JSON.stringify(orgLd)}</script>
       </Helmet>
       <Header />
-      <main className="flex-1">{children}</main>
+      <main className="flex-1 pb-16 md:pb-0">{children}</main>
       <Footer />
+      <MobileBottomNav />
       <CookieConsent />
       <PushNotificationsPrompt />
       <BreakingNewsAlerts />

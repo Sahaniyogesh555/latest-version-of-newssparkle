@@ -1,9 +1,7 @@
-// Auto-publishing edge function — Smart Decision Engine
-// Body: { category: string, slot: "morning"|"midday"|"evening", type?: string, topic?: string }
-// Cron triggers this 18× per day across 6 categories × 3 slots.
-// - morning  → NewsAPI (freshness)
-// - midday   → SerpAPI Google News (trending)
-// - evening  → SerpAPI deep + AI long-form (ranking)
+// Auto-publishing edge function — Smart newsroom scheduler and article publisher
+// Body: { category: string, slot: "morning"|"midday"|"evening", topic?: string }
+// Target output: 18 posts daily across 6 categories × 3 slots.
+// Source priority: RSS → Google Trends RSS → GNews API → NewsAPI → SerpAPI (selective).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -12,11 +10,79 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+interface NewsAPIArticle {
+  title: string;
+  url: string;
+  description?: string;
+  source?: { name?: string };
+  publishedAt: string;
+}
+
+interface NewsAPIResponse {
+  articles?: NewsAPIArticle[];
+}
+
+interface SerpAPIArticle {
+  title: string;
+  link: string;
+  snippet?: string;
+  source?: { name?: string };
+  date?: string;
+}
+
+interface SerpAPIResponse {
+  news_results?: SerpAPIArticle[];
+}
+
 const CATEGORIES = ["breaking-news", "politics", "business", "technology", "health", "entertainment"] as const;
 type Cat = (typeof CATEGORIES)[number];
 type Slot = "morning" | "midday" | "evening";
 
-// NewsAPI category mapping
+type SourceItem = { title: string; url?: string; snippet?: string; source?: string; published?: string };
+
+const RSS_FEEDS: Record<Cat, string[]> = {
+  "breaking-news": [
+    "http://feeds.reuters.com/reuters/topNews",
+    "http://feeds.bbci.co.uk/news/rss.xml",
+    "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+  ],
+  politics: [
+    "http://feeds.reuters.com/Reuters/PoliticsNews",
+    "https://apnews.com/hub/politics/rss",
+  ],
+  business: [
+    "https://www.cnbc.com/id/10001147/device/rss/rss.html",
+    "https://finance.yahoo.com/news/rssindex",
+    "https://www.bloomberg.com/markets/rss",
+  ],
+  technology: [
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml",
+    "https://www.wired.com/feed/rss",
+  ],
+  health: [
+    "https://www.healthline.com/rss",
+    "https://www.who.int/feeds/entity/csr/don/en/rss.xml",
+    "https://www.medicalnewstoday.com/rss",
+  ],
+  entertainment: [
+    "https://variety.com/feed/",
+    "https://www.billboard.com/feed/",
+    "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+  ],
+};
+
+const GOOGLE_TRENDS_RSS = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=US";
+
+const GNEWS_QUERY: Record<Cat, string> = {
+  "breaking-news": "breaking news latest",
+  politics: "politics government elections",
+  business: "business economy markets",
+  technology: "technology AI innovation",
+  health: "health wellness medical research",
+  entertainment: "entertainment celebrity trending",
+};
+
 const NEWSAPI_CAT: Record<Cat, string> = {
   "breaking-news": "general",
   politics: "general",
@@ -26,7 +92,6 @@ const NEWSAPI_CAT: Record<Cat, string> = {
   entertainment: "entertainment",
 };
 
-// SerpAPI Google News topic tokens
 const SERPAPI_QUERY: Record<Cat, string> = {
   "breaking-news": "breaking news today latest updates",
   politics: "politics government elections today",
@@ -40,7 +105,76 @@ const slugify = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-").slice(0, 70) +
   "-" + Math.random().toString(36).slice(2, 7);
 
-interface SourceItem { title: string; url?: string; snippet?: string; source?: string; published?: string }
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").replace(/[^a-z0-9 ]/g, "").trim();
+}
+
+function dedupeSources(items: SourceItem[]): SourceItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = normalizeText(item.title || "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function parseRssItems(xmlText: string, sourceLabel: string): Promise<SourceItem[]> {
+  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+  if (!doc) return [];
+  return Array.from(doc.querySelectorAll("item")).map((item) => ({
+    title: item.querySelector("title")?.textContent?.trim() || "",
+    url: item.querySelector("link")?.textContent?.trim() || item.querySelector("guid")?.textContent?.trim(),
+    snippet: item.querySelector("description")?.textContent?.trim() || item.querySelector("summary")?.textContent?.trim(),
+    source: sourceLabel,
+    published: item.querySelector("pubDate")?.textContent?.trim() || item.querySelector("updated")?.textContent?.trim(),
+  })).filter((item) => !!item.title);
+}
+
+async function fetchRssFromUrl(url: string): Promise<SourceItem[]> {
+  const res = await fetch(url, { headers: { "User-Agent": "NewsSparkle-RSS/1.0" } });
+  if (!res.ok) return [];
+  const text = await res.text();
+  return parseRssItems(text, url);
+}
+
+async function fetchRss(category: Cat): Promise<SourceItem[]> {
+  const urls = RSS_FEEDS[category] || [];
+  const results = await Promise.all(urls.map((url) => fetchRssFromUrl(url).catch(() => [])));
+  return dedupeSources(results.flat()).slice(0, 12);
+}
+
+async function fetchGoogleTrends(category: Cat): Promise<SourceItem[]> {
+  const res = await fetch(GOOGLE_TRENDS_RSS, { headers: { "User-Agent": "NewsSparkle-Trends/1.0" } });
+  if (!res.ok) return [];
+  const text = await res.text();
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (!doc) return [];
+  return Array.from(doc.querySelectorAll("item")).slice(0, 12).map((item) => ({
+    title: item.querySelector("title")?.textContent?.trim() || "",
+    url: item.querySelector("link")?.textContent?.trim() || undefined,
+    snippet: item.querySelector("description")?.textContent?.trim() || undefined,
+    source: "Google Trends",
+    published: item.querySelector("pubDate")?.textContent?.trim() || undefined,
+  })).filter((item) => !!item.title);
+}
+
+async function fetchGNews(category: Cat): Promise<SourceItem[]> {
+  const key = Deno.env.get("GNEWS_API_KEY");
+  if (!key) throw new Error("GNEWS_API_KEY not configured");
+  const query = encodeURIComponent(GNEWS_QUERY[category]);
+  const url = `https://gnews.io/api/v4/search?q=${query}&lang=en&max=10&country=us&token=${key}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`GNews ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  return (data.articles || []).map((a: any) => ({
+    title: a.title,
+    url: a.url,
+    snippet: a.description,
+    source: a.source?.name || a.source,
+    published: a.publishedAt,
+  })).filter((item) => !!item.title);
+}
 
 async function fetchNewsAPI(category: Cat): Promise<SourceItem[]> {
   const key = Deno.env.get("NEWSAPI_KEY");
@@ -49,10 +183,14 @@ async function fetchNewsAPI(category: Cat): Promise<SourceItem[]> {
   const url = `https://newsapi.org/v2/top-headlines?language=en&pageSize=10&category=${cat}`;
   const res = await fetch(url, { headers: { "X-Api-Key": key } });
   if (!res.ok) throw new Error(`NewsAPI ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return (data.articles || []).map((a: any) => ({
-    title: a.title, url: a.url, snippet: a.description, source: a.source?.name, published: a.publishedAt,
-  })).filter((i: SourceItem) => i.title && !i.title.includes("[Removed]"));
+  const data: NewsAPIResponse = await res.json();
+  return (data.articles || []).map((a: NewsAPIArticle) => ({
+    title: a.title,
+    url: a.url,
+    snippet: a.description,
+    source: a.source?.name,
+    published: a.publishedAt,
+  })).filter((item) => !!item.title && !item.title.includes("[Removed]"));
 }
 
 async function fetchSerpAPI(category: Cat): Promise<SourceItem[]> {
@@ -62,50 +200,83 @@ async function fetchSerpAPI(category: Cat): Promise<SourceItem[]> {
   const url = `https://serpapi.com/search.json?engine=google_news&q=${q}&hl=en&api_key=${key}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`SerpAPI ${res.status}: ${await res.text()}`);
-  const data = await res.json();
+  const data: SerpAPIResponse = await res.json();
   const items = (data.news_results || []).slice(0, 10);
-  return items.map((a: any) => ({
-    title: a.title, url: a.link, snippet: a.snippet, source: a.source?.name, published: a.date,
-  })).filter((i: SourceItem) => i.title);
+  return items.map((a: SerpAPIArticle) => ({
+    title: a.title,
+    url: a.link,
+    snippet: a.snippet,
+    source: a.source?.name,
+    published: a.date,
+  })).filter((item) => !!item.title);
 }
 
-interface GeneratedPost {
-  title: string; meta_title: string; meta_description: string; excerpt: string;
-  content_markdown: string; keywords: string[]; key_takeaways: string[];
-  faq: Array<{ q: string; a: string }>; featured_image_alt: string; reading_minutes: number;
+async function collectSources(category: Cat, slot: Slot): Promise<SourceItem[]> {
+  const gathered: SourceItem[] = [];
+  const add = (items: SourceItem[]) => gathered.push(...items);
+
+  if (slot === "morning") {
+    add(await fetchRss(category));
+    if (gathered.length < 6) {
+      try { add(await fetchGNews(category)); } catch {}
+    }
+    if (gathered.length < 6) {
+      try { add(await fetchNewsAPI(category)); } catch {}
+    }
+  } else if (slot === "midday") {
+    add(await fetchGoogleTrends(category));
+    if (gathered.length < 6) {
+      add(await fetchRss(category));
+    }
+    if (gathered.length < 6) {
+      try { add(await fetchSerpAPI(category)); } catch {}
+    }
+  } else {
+    add(await fetchRss(category));
+    add(await fetchGoogleTrends(category));
+    try { add(await fetchGNews(category)); } catch {}
+    try { add(await fetchNewsAPI(category)); } catch {}
+    if (gathered.length < 10) {
+      try { add(await fetchSerpAPI(category)); } catch {}
+    }
+  }
+
+  return dedupeSources(gathered).slice(0, 12);
 }
 
 async function generatePost(category: Cat, slot: Slot, sources: SourceItem[], topicHint?: string): Promise<GeneratedPost> {
   const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
   if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
 
-  const wordTarget = slot === "evening" ? "900-1100" : slot === "midday" ? "700-900" : "600-800";
+  const wordTarget = slot === "evening" ? "1200-2000" : slot === "midday" ? "500-800" : "250-450";
   const angle = slot === "evening"
-    ? "deep analysis with background, expert framing, multiple angles, future outlook"
+    ? "deep analysis with background, expert framing, multiple angles, future outlook, timeline if relevant"
     : slot === "midday"
-    ? "trending explainer focused on what's gaining attention right now"
-    : "fast breaking-news brief that captures the latest facts clearly";
+    ? "trending explainer focused on what is gaining attention now and why it matters"
+    : "fast breaking-news brief that captures the latest facts clearly and verifies sources";
 
-  const sourcesBlock = sources.slice(0, 6).map((s, i) =>
-    `[${i+1}] ${s.title}${s.source ? ` — ${s.source}` : ""}${s.published ? ` (${s.published})` : ""}\n    ${s.snippet || ""}`,
+  const sourcesBlock = sources.slice(0, 7).map((s, i) =>
+    `[${i + 1}] ${s.title}${s.source ? ` — ${s.source}` : ""}${s.published ? ` (${s.published})` : ""}\n    ${s.snippet || ""}`,
   ).join("\n");
 
-  const systemPrompt = `You are a senior journalist + SEO expert writing original news articles for a daily news website.
-Output ONLY valid JSON via the tool call — no markdown wrapping.
+  const systemPrompt = `You are a senior journalist and SEO expert writing original news articles for a daily newsroom.
+Output ONLY valid JSON via the tool call — no markdown wrappers.
 Rules:
 - Pick ONE clear story from the source headlines below; do NOT just list them.
-- Rewrite in your own words, journalistic neutral tone, NEVER copy sentences verbatim.
-- Headline: high-CTR, SEO, under 70 chars, includes focus keyword.
-- Meta title 50-60 chars; meta description 150-160 chars.
-- Body markdown: hook intro, ## H2 + ### H3 sections (background, latest developments, key facts, impact, what's next), short paragraphs, bold key terms, bullet lists where useful, conclusion.
+- Rewrite in your own words, with journalistic accuracy and neutral tone.
+- Include a strong focus keyword and use it in title, meta description, first paragraph, headings, and image alt text.
+- SEO title: <70 chars. Meta title: 50-60 chars. Meta description: 150-160 chars.
+- Use H1 title, at least two H2 headings, and at least one H3 heading.
+- Add at least two internal link anchors to other NewsSparkle articles.
+- Include a related articles section with 3 short headline-style entries.
+- For evening articles, include a FAQ section, detailed analysis, timeline if relevant, and expert insights if available.
+- Use short paragraphs, bullet lists for readability, and a concise conclusion.
 - Word target: ${wordTarget}.
-- Angle for this slot: ${angle}.
-- 4 key takeaways, 3 FAQs, 6 SEO keywords (mix primary + long-tail).
-- featured_image_alt: descriptive 8-14 words, includes main subject.`;
+- Angle: ${angle}.`;
 
   const userPrompt = `Category: ${category.toUpperCase()} — Slot: ${slot.toUpperCase()}
 ${topicHint ? `Suggested angle: ${topicHint}\n` : ""}
-Source headlines from today (use as research input, do not copy):
+Sources (use as research input, do not copy):
 ${sourcesBlock}
 
 Write the article now.`;
@@ -117,11 +288,14 @@ Write the article now.`;
       parameters: {
         type: "object",
         properties: {
-          title: { type: "string" }, meta_title: { type: "string" }, meta_description: { type: "string" },
-          excerpt: { type: "string" }, content_markdown: { type: "string" },
-          keywords: { type: "array", items: { type: "string" }, minItems: 5, maxItems: 8 },
-          key_takeaways: { type: "array", items: { type: "string" }, minItems: 3, maxItems: 5 },
-          faq: { type: "array", items: { type: "object", properties: { q: { type: "string" }, a: { type: "string" } }, required: ["q","a"] }, minItems: 2, maxItems: 4 },
+          title: { type: "string" },
+          meta_title: { type: "string" },
+          meta_description: { type: "string" },
+          excerpt: { type: "string" },
+          content_markdown: { type: "string" },
+          keywords: { type: "array", items: { type: "string" }, minItems: 6, maxItems: 8 },
+          key_takeaways: { type: "array", items: { type: "string" }, minItems: 4, maxItems: 6 },
+          faq: { type: "array", items: { type: "object", properties: { q: { type: "string" }, a: { type: "string" } }, required: ["q","a"] }, minItems: 3, maxItems: 5 },
           featured_image_alt: { type: "string" },
           reading_minutes: { type: "integer" },
         },
@@ -155,7 +329,7 @@ Write the article now.`;
   return JSON.parse(call.function.arguments) as GeneratedPost;
 }
 
-function pickFeaturedImage(category: Cat, keywords: string[]): string {
+async function pickFeaturedImage(category: Cat, keywords: string[]): Promise<string> {
   const kw = encodeURIComponent((keywords[0] || category).replace(/[^a-z0-9 ]/gi, ""));
   return `https://source.unsplash.com/1600x900/?${kw},${category}`;
 }
@@ -173,26 +347,15 @@ Deno.serve(async (req) => {
 
     const category = (CATEGORIES.includes(body.category as Cat) ? body.category : "breaking-news") as Cat;
     const slot: Slot = (["morning","midday","evening"].includes(body.slot as string) ? body.slot : "midday") as Slot;
-    const api = slot === "morning" ? "newsapi" : "serpapi";
 
-    let sources: SourceItem[] = [];
-    let sourceErr: string | undefined;
-    try {
-      sources = api === "newsapi" ? await fetchNewsAPI(category) : await fetchSerpAPI(category);
-    } catch (e) {
-      sourceErr = (e as Error).message;
-      // Fallback to the other API
-      try {
-        sources = api === "newsapi" ? await fetchSerpAPI(category) : await fetchNewsAPI(category);
-      } catch { /* both failed; AI will work from topic hint only */ }
-    }
-
+    const sources = await collectSources(category, slot);
     const article = await generatePost(category, slot, sources, body.topic);
     const slug = slugify(article.title);
-    const featured_image_url = pickFeaturedImage(category, article.keywords);
+    const featured_image_url = await pickFeaturedImage(category, article.keywords);
 
     const { error } = await supabase.from("posts").insert({
-      title: article.title, slug,
+      title: article.title,
+      slug,
       excerpt: article.excerpt,
       content: article.content_markdown,
       meta_title: article.meta_title.slice(0, 60),
@@ -211,14 +374,18 @@ Deno.serve(async (req) => {
     if (error) throw new Error(`DB insert: ${error.message}`);
 
     return new Response(JSON.stringify({
-      ok: true, slug, category, slot, api_used: api,
+      ok: true,
+      slug,
+      category,
+      slot,
+      sources_count: sources.length,
       reason: slot === "morning" ? "scheduled-breaking" : slot === "midday" ? "scheduled-trending" : "scheduled-deep",
-      sources_count: sources.length, source_warning: sourceErr,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (e) {
     console.error("auto-publish fatal:", e);
     return new Response(JSON.stringify({ ok: false, error: (e as Error).message }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });

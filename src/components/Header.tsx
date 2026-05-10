@@ -28,11 +28,11 @@ export function Header() {
             className="flex items-baseline gap-1.5 select-none"
             style={{ fontFamily: "'Fraunces', Georgia, serif" }}
           >
-            <span className="text-2xl sm:text-[28px] font-black tracking-tight text-headline">
+            <span className="text-xl sm:text-2xl md:text-[28px] font-black tracking-tight text-headline">
               {brandLead}
             </span>
             {brandAccent && (
-              <span className="text-2xl sm:text-[28px] font-black tracking-tight text-primary">
+              <span className="text-xl sm:text-2xl md:text-[28px] font-black tracking-tight text-primary">
                 {brandAccent}
               </span>
             )}

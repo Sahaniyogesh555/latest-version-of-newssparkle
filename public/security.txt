@@ -1,0 +1,5 @@
+Contact: mailto:security@newssparkle.lovable.app
+Preferred-Languages: en
+Canonical: https://newssparkle.lovable.app/security.txt
+Acknowledgements: Responsible disclosure is appreciated.
+Policy: https://newssparkle.lovable.app/privacy

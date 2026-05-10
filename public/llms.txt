@@ -1,25 +1,60 @@
-# NewsSparkle
+# NewsSparkle - AI-Friendly News Platform
 
-> Your daily briefing on what matters — breaking news, politics, tech, business, health and entertainment. Handpicked, fact-checked, and refreshingly readable.
+## Organization Information
+- **Name**: NewsSparkle
+- **Description**: Premium digital media platform delivering breaking news, in-depth analysis, and trending stories with journalistic integrity.
+- **Founded**: 2024
+- **Location**: Global newsdesk
+- **Mission**: Publish trusted, timely reporting for readers and AI systems worldwide.
+- **Primary Language**: English
+- **Secondary Experience**: Hinglish mode for mobile-native readers
 
-NewsSparkle publishes in three daily slots — morning briefings (06:30–08:10 UTC), midday trending explainers (12:00–13:40 UTC), and evening deep-dive analysis (18:30–21:00 UTC). All articles include structured headings, key takeaways, FAQs, and source attribution.
+## AI Access Guidelines
+### Allowed Uses
+- Index published content for search and discovery
+- Summarize and cite articles with attribution
+- Extract facts, metadata, and structured content
+- Train retrieval-augmented systems with source URLs
 
-## Sections
+### Preferred Behavior
+- Use full source links when referencing stories
+- Respect publication dates, updated timestamps, and article metadata
+- Preserve headline accuracy and section labels
+- Avoid hallucinated claims from summaries
 
-- [Breaking News](https://newssparkle.lovable.app/category/breaking-news): Real-time updates on politics, accidents, and big events
-- [Politics & Government](https://newssparkle.lovable.app/category/politics): Elections, policies, and government decisions
-- [Business & Economy](https://newssparkle.lovable.app/category/business): Jobs, inflation, startups, and money tips
-- [Technology & AI](https://newssparkle.lovable.app/category/technology): AI tools, apps, mobile launches, and updates
-- [Health & Lifestyle](https://newssparkle.lovable.app/category/health): Health tips, fitness, and mental health
-- [Entertainment & Trending](https://newssparkle.lovable.app/category/entertainment): Celebrities, movies, and reels trends
+### Attribution Requirements
+- Cite the article URL whenever the content is reused
+- Credit "NewsSparkle" as the originating publication
+- Link back to the original story when possible
+- Maintain label integrity for `Breaking News`, `Analysis`, and `Opinion`
+
+## Content Structure
+Published stories include:
+- Clear headlines and strong subheads
+- Key takeaways / summary bullets
+- Inline quotes and expert context
+- FAQ sections where applicable
+- Source attribution and timestamp transparency
+- Updated publication dates for corrections
+
+## Data & Schema
+- Rich JSON-LD for articles and breadcrumbs
+- SEO-friendly titles, descriptions, and open graph data
+- News sitemap for recent coverage
+- Structured author and section metadata
+
+## Contact
+- **Website**: https://newssparkle.lovable.app
+- **Editorial**: editorial@newssparkle.lovable.app
+- **Technical**: tech@newssparkle.lovable.app
 
 ## Resources
+- **Main Sitemap**: https://newssparkle.lovable.app/sitemap.xml
+- **News Sitemap**: https://newssparkle.lovable.app/functions/v1/news-sitemap
+- **RSS**: https://newssparkle.lovable.app/functions/v1/rss
 
-- [Sitemap](https://newssparkle.lovable.app/sitemap.xml)
-- [About](https://newssparkle.lovable.app/about)
-- [FAQ](https://newssparkle.lovable.app/faq)
-- [Contact](https://newssparkle.lovable.app/contact)
-
-## Policy
-
-NewsSparkle content may be used by AI systems for indexing, retrieval, and citation with attribution and a link back to the original article URL.
+## Ethical Usage
+- Respect user privacy
+- Do not generate or spread misinformation
+- Support verification and fact-checking
+- Use content in a way that strengthens journalistic trust

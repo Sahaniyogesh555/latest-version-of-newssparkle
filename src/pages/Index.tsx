@@ -5,9 +5,16 @@ import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
 import { CATEGORIES, SITE, formatDate } from "@/lib/site";
+import { BreakingNewsTicker } from "@/components/BreakingNewsTicker";
+import { HeroFeaturedGrid } from "@/components/HeroFeaturedGrid";
+import { TrendingSection } from "@/components/TrendingSection";
+import { CategoryBlock } from "@/components/CategoryBlock";
+import { EditorsPicksSection } from "@/components/EditorsPicksSection";
+import { ContinueReading } from "@/components/ContinueReading";
 import { Link } from "react-router-dom";
+import { Mail, Heart } from "lucide-react";
 
-const PAGE_SIZE = 12;
+const PAGE_SIZE = 15;
 
 export default function Index() {
   const [posts, setPosts] = useState<Post[]>([]);
@@ -15,16 +22,41 @@ export default function Index() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const [categoryPosts, setCategoryPosts] = useState<Record<string, Post[]>>({});
 
   useEffect(() => {
-    supabase.from("posts").select("*").eq("status", "published")
-      .order("published_at", { ascending: false }).range(0, PAGE_SIZE + 1)
-      .then(({ data }) => {
-        const list = (data as Post[]) || [];
-        setPosts(list);
-        setHasMore(list.length >= PAGE_SIZE + 2);
-        setLoading(false);
-      });
+    const initialize = async () => {
+      // Fetch main feed
+      const { data: mainPosts } = await supabase
+        .from("posts")
+        .select("*")
+        .eq("status", "published")
+        .order("published_at", { ascending: false })
+        .range(0, PAGE_SIZE);
+
+      const postList = (mainPosts as Post[]) || [];
+      setPosts(postList);
+      setHasMore(postList.length === PAGE_SIZE + 1);
+      setLoading(false);
+
+      // Fetch posts for each category (for category blocks)
+      const categoryData: Record<string, Post[]> = {};
+      for (const cat of CATEGORIES) {
+        const { data } = await supabase
+          .from("posts")
+          .select("*")
+          .eq("category_slug", cat.slug)
+          .eq("status", "published")
+          .order("published_at", { ascending: false })
+          .limit(4);
+        if (data) {
+          categoryData[cat.slug] = (data as Post[]) || [];
+        }
+      }
+      setCategoryPosts(categoryData);
+    };
+
+    initialize();
   }, []);
 
   const loadMore = useCallback(async () => {
@@ -32,17 +64,21 @@ export default function Index() {
     setLoadingMore(true);
     const from = posts.length;
     const to = from + PAGE_SIZE - 1;
-    const { data } = await supabase.from("posts").select("*").eq("status", "published")
-      .order("published_at", { ascending: false }).range(from, to);
+    const { data } = await supabase
+      .from("posts")
+      .select("*")
+      .eq("status", "published")
+      .order("published_at", { ascending: false })
+      .range(from, to);
     const next = (data as Post[]) || [];
-    setPosts(prev => [...prev, ...next]);
+    setPosts((prev) => [...prev, ...next]);
     setHasMore(next.length === PAGE_SIZE);
     setLoadingMore(false);
   }, [posts.length, loadingMore, hasMore]);
 
   useEffect(() => {
     if (!sentinelRef.current || !hasMore || loading) return;
-    const obs = new IntersectionObserver(entries => {
+    const obs = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) loadMore();
     }, { rootMargin: "800px" });
     obs.observe(sentinelRef.current);
@@ -50,16 +86,24 @@ export default function Index() {
   }, [loadMore, hasMore, loading]);
 
   const hero = posts[0];
-  const latest = posts.slice(1);
+  const secondary = posts.slice(1, 4);
+  const editorsPicks = posts.filter((_, i) => i % 3 === 0).slice(0, 6);
+  const trending = posts.slice(0, 12).sort((a, b) => (b.views || 0) - (a.views || 0));
+  const latest = posts.slice(4);
 
   const trendingTags = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const p of posts) for (const k of (p.keywords || [])) {
-      const tag = k.trim();
-      if (!tag) continue;
-      counts.set(tag, (counts.get(tag) || 0) + 1);
+    for (const p of posts.slice(0, 50)) {
+      for (const k of p.keywords || []) {
+        const tag = k.trim();
+        if (!tag) continue;
+        counts.set(tag, (counts.get(tag) || 0) + 1);
+      }
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([t]) => t);
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([t]) => t);
   }, [posts]);
 
   const todayLabel = formatDate(new Date().toISOString()).toUpperCase();
@@ -71,7 +115,11 @@ export default function Index() {
     alternateName: SITE.tagline,
     url: SITE.url,
     description: SITE.description,
-    publisher: { "@type": "Organization", name: SITE.name, logo: { "@type": "ImageObject", url: `${SITE.url}/logo.png` } },
+    publisher: {
+      "@type": "NewsMediaOrganization",
+      name: SITE.name,
+      logo: { "@type": "ImageObject", url: `${SITE.url}/logo.png` },
+    },
     potentialAction: {
       "@type": "SearchAction",
       target: { "@type": "EntryPoint", urlTemplate: `${SITE.url}/?s={search_term_string}` },
@@ -81,92 +129,105 @@ export default function Index() {
 
   return (
     <Layout>
-      <SEO title={`${SITE.name} — ${SITE.tagline}`} description={SITE.description} path="/" jsonLd={websiteLd} />
+      <SEO
+        title={`${SITE.name} — ${SITE.tagline}`}
+        description={SITE.description}
+        path="/"
+        jsonLd={websiteLd}
+      />
 
-      {/* Issue masthead */}
-      <section className="container-wide pt-14 sm:pt-20 pb-10 text-center">
-        <div className="kicker text-primary">ISSUE · {todayLabel}</div>
-        <h1 className="headline-hero mt-5 max-w-4xl mx-auto">
-          {SITE.name} — Breaking news, politics, business, tech &amp; <em className="not-italic text-primary font-serif italic">more.</em>
-        </h1>
-        <p className="mt-6 max-w-2xl mx-auto text-lg text-foreground/70 leading-relaxed">
-          {SITE.description}
-        </p>
-      </section>
+      {/* Breaking News Ticker */}
+      <BreakingNewsTicker />
 
-      <div className="container-wide"><div className="border-t border-border" /></div>
-
-      {/* Featured story */}
-      <section className="container-wide py-12 sm:py-16">
-        {loading ? (
-          <div className="animate-pulse space-y-6">
-            <div className="h-80 bg-muted rounded" />
-            <div className="h-8 bg-muted w-3/4 rounded" />
-          </div>
-        ) : hero ? (
-          <PostCard post={hero} variant="hero" />
-        ) : (
-          <div className="text-center py-20">
-            <h2 className="font-serif text-3xl font-bold">Stories arriving shortly</h2>
-            <p className="mt-3 text-byline">Our editorial desk publishes fresh reporting every four hours.</p>
-          </div>
-        )}
-      </section>
-
-      {/* Browse the desk */}
-      <section className="bg-secondary/60 border-y border-border">
-        <div className="container-wide py-10">
-          <div className="kicker text-byline mb-5">BROWSE THE DESK</div>
-          <div className="flex flex-wrap gap-3">
-            {CATEGORIES.map(c => (
-              <Link
-                key={c.slug}
-                to={`/category/${c.slug}`}
-                className="px-5 py-2.5 border border-border bg-background text-[15px] font-medium text-headline hover:border-primary hover:text-primary transition-colors"
-              >
-                {c.name}
-              </Link>
-            ))}
-          </div>
+      {/* Hero Masthead */}
+      <section className="container-wide pt-12 sm:pt-16 pb-8">
+        <div className="text-center mb-8">
+          <div className="kicker text-primary mb-3">TODAY'S ISSUE · {todayLabel}</div>
+          <h1 className="headline-hero max-w-4xl mx-auto">
+            {SITE.name} — Breaking news, politics, business, tech <em className="not-italic text-primary font-serif italic">& more</em>
+          </h1>
+          <p className="mt-6 max-w-2xl mx-auto text-lg text-foreground/70 leading-relaxed">
+            {SITE.description}
+          </p>
         </div>
       </section>
 
-      {/* Latest stories */}
+      {/* Featured hero grid */}
+      {!loading && hero && (
+        <HeroFeaturedGrid featured={hero} secondary={secondary} />
+      )}
+
+      {/* Continue reading */}
+      <div className="container-wide py-8">
+        <ContinueReading />
+      </div>
+
+      {/* Trending section */}
+      {trending.length > 0 && <TrendingSection posts={trending} />}
+
+      {/* Category blocks */}
+      {Object.entries(categoryPosts).map(([slug, posts]) =>
+        posts.length > 0 ? (
+          <CategoryBlock key={slug} categorySlug={slug} posts={posts} />
+        ) : null
+      )}
+
+      {/* Editor's Picks */}
+      {editorsPicks.length > 0 && <EditorsPicksSection posts={editorsPicks} />}
+
+      {/* Latest News Feed */}
       {latest.length > 0 && (
-        <section className="container-wide py-14 sm:py-20">
+        <section className="container-wide py-12 sm:py-16">
           <div className="flex items-baseline justify-between mb-10 pb-4 border-b border-rule">
-            <h2 className="font-serif text-3xl sm:text-4xl font-bold text-headline">Latest stories</h2>
-            <span className="kicker text-byline hidden sm:inline">Updated continuously</span>
+            <h2 className="headline-lg">Latest Stories</h2>
+            <span className="kicker text-byline hidden sm:inline">
+              Updated continuously
+            </span>
           </div>
-          <div className="grid gap-12 sm:grid-cols-2 lg:grid-cols-3">
-            {latest.map(p => <PostCard key={p.id} post={p} />)}
-          </div>
-          <div ref={sentinelRef} aria-hidden className="h-10" />
-          {loadingMore && (
-            <div className="mt-10 grid gap-12 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
-              {[...Array(3)].map((_, i) => <div key={i} className="h-72 bg-muted" />)}
+
+          {loading ? (
+            <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
+              {[...Array(6)].map((_, i) => (
+                <div key={i} className="h-80 bg-muted rounded-lg" />
+              ))}
             </div>
-          )}
-          {!hasMore && latest.length > 0 && (
-            <p className="text-center text-byline text-sm uppercase tracking-wider mt-10">— End of feed —</p>
+          ) : (
+            <>
+              <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3">
+                {latest.slice(0, PAGE_SIZE).map((p) => (
+                  <PostCard key={p.id} post={p} />
+                ))}
+              </div>
+              <div ref={sentinelRef} aria-hidden className="h-10 mt-10" />
+              {loadingMore && (
+                <div className="mt-10 grid gap-10 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} className="h-80 bg-muted rounded-lg" />
+                  ))}
+                </div>
+              )}
+              {!hasMore && latest.length > 0 && (
+                <p className="text-center text-byline text-sm uppercase tracking-wider mt-12">
+                  — End of feed —
+                </p>
+              )}
+            </>
           )}
         </section>
       )}
 
       {/* Trending tags */}
       {trendingTags.length > 0 && (
-        <section className="border-y border-border bg-muted/40">
-          <div className="container-wide py-12">
-            <div className="kicker text-primary mb-4">TRENDING</div>
-            <h2 className="font-serif text-2xl sm:text-3xl font-bold text-headline mb-6">
-              What people are reading about
-            </h2>
-            <div className="flex flex-wrap gap-2.5">
-              {trendingTags.map(tag => (
+        <section className="border-y border-rule bg-muted/40">
+          <div className="container-wide py-12 sm:py-16">
+            <div className="kicker text-primary mb-4">POPULAR TOPICS</div>
+            <h2 className="headline-lg mb-8">What people are reading about</h2>
+            <div className="flex flex-wrap gap-3">
+              {trendingTags.map((tag) => (
                 <Link
                   key={tag}
                   to={`/tag/${encodeURIComponent(tag)}`}
-                  className="px-3.5 py-1.5 text-sm bg-background border border-border text-foreground/80 hover:border-primary hover:text-primary transition-colors"
+                  className="px-4 py-2 text-sm bg-card border border-border text-foreground/80 hover:border-primary hover:text-primary hover:bg-card/80 transition-all rounded-lg"
                 >
                   #{tag}
                 </Link>
@@ -176,38 +237,129 @@ export default function Index() {
         </section>
       )}
 
-      {/* Newsletter CTA */}
+      {/* Newsletter CTA Section */}
       <section className="container-wide py-16 sm:py-24">
-        <div className="max-w-2xl mx-auto text-center">
-          <div className="kicker text-primary mb-4">THE BRIEF</div>
-          <h2 className="font-serif text-3xl sm:text-5xl font-bold text-headline leading-[1.1]">
-            One email. <em className="text-primary not-italic italic font-serif">Every morning.</em>
-          </h2>
-          <p className="mt-5 text-lg text-foreground/70 leading-relaxed">
-            The stories that matter, written for the curious and edited for the busy. Delivered before your first coffee.
-          </p>
-          <form
-            onSubmit={(e) => { e.preventDefault(); }}
-            className="mt-8 flex flex-col sm:flex-row gap-3 max-w-md mx-auto"
-          >
-            <input
-              type="email"
-              required
-              placeholder="you@example.com"
-              className="flex-1 px-4 py-3 bg-background border border-border focus:border-primary focus:outline-none text-base"
-            />
-            <button
-              type="submit"
-              className="px-6 py-3 bg-primary text-primary-foreground font-semibold text-[15px] tracking-wide hover:bg-primary/90 transition-colors"
+        <div className="max-w-2xl mx-auto">
+          <div className="card-base p-8 sm:p-12 text-center">
+            <div className="flex justify-center mb-6">
+              <div className="p-3 bg-primary/10 rounded-full">
+                <Mail className="size-8 text-primary" />
+              </div>
+            </div>
+            <div className="kicker text-primary mb-3">STAY INFORMED</div>
+            <h2 className="headline-lg mb-4">
+              Get the news that matters, every morning.
+            </h2>
+            <p className="text-lg text-foreground/70 leading-relaxed mb-8">
+              The stories you need to know, fact-checked, and edited for clarity. One email.
+              Every day. Free.
+            </p>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+              }}
+              className="flex flex-col sm:flex-row gap-3 max-w-md mx-auto"
             >
-              Subscribe
-            </button>
-          </form>
-          <p className="mt-4 text-xs text-byline uppercase tracking-wider">
-            Free · Unsubscribe anytime
-          </p>
+              <input
+                type="email"
+                required
+                placeholder="you@example.com"
+                className="flex-1 px-4 py-3 bg-background border border-border rounded-lg focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm transition-all"
+              />
+              <button
+                type="submit"
+                className="btn-primary px-6 py-3 whitespace-nowrap"
+              >
+                Subscribe
+              </button>
+            </form>
+            <p className="mt-4 text-xs text-byline uppercase tracking-wider">
+              Unsubscribe anytime. Privacy guaranteed.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Trust signals footer section */}
+      <section className="border-t border-border">
+        <div className="container-wide py-12">
+          <div className="grid gap-8 md:grid-cols-3 lg:grid-cols-4">
+            <div>
+              <h3 className="font-serif font-bold text-headline mb-3">Editorial</h3>
+              <ul className="space-y-2 text-sm text-foreground/70">
+                <li>
+                  <Link
+                    to="/editorial-policy"
+                    className="hover:text-primary transition-colors"
+                  >
+                    Editorial Policy
+                  </Link>
+                </li>
+                <li>
+                  <Link to="/corrections" className="hover:text-primary transition-colors">
+                    Corrections
+                  </Link>
+                </li>
+                <li>
+                  <Link to="/contact" className="hover:text-primary transition-colors">
+                    Submit a Tip
+                  </Link>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="font-serif font-bold text-headline mb-3">Legal</h3>
+              <ul className="space-y-2 text-sm text-foreground/70">
+                <li>
+                  <Link to="/terms" className="hover:text-primary transition-colors">
+                    Terms of Service
+                  </Link>
+                </li>
+                <li>
+                  <Link to="/privacy" className="hover:text-primary transition-colors">
+                    Privacy Policy
+                  </Link>
+                </li>
+                <li>
+                  <Link to="/disclaimer" className="hover:text-primary transition-colors">
+                    Disclaimer
+                  </Link>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="font-serif font-bold text-headline mb-3">About</h3>
+              <ul className="space-y-2 text-sm text-foreground/70">
+                <li>
+                  <Link to="/about" className="hover:text-primary transition-colors">
+                    About Us
+                  </Link>
+                </li>
+                <li>
+                  <Link to="/authors" className="hover:text-primary transition-colors">
+                    Our Team
+                  </Link>
+                </li>
+                <li>
+                  <Link to="/brand" className="hover:text-primary transition-colors">
+                    Brand Guidelines
+                  </Link>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="font-serif font-bold text-headline mb-3">Contact</h3>
+              <p className="text-sm text-foreground/70">
+                Email:{" "}
+                <a href={`mailto:${SITE.email}`} className="text-primary hover:underline">
+                  {SITE.email}
+                </a>
+              </p>
+            </div>
+          </div>
         </div>
       </section>
     </Layout>
   );
 }
+

@@ -1,0 +1,6 @@
+Contact: mailto:security@newssparkle.lovable.app
+Contact: https://newssparkle.lovable.app/contact
+Encryption: https://newssparkle.lovable.app/pgp-key.txt
+Preferred-Languages: en
+Canonical: https://newssparkle.lovable.app/.well-known/security.txt
+Policy: https://newssparkle.lovable.app/security-policy

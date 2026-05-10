@@ -4,9 +4,10 @@ import { Twitter, Facebook, Linkedin, Link2, Check, MessageCircle } from "lucide
 interface Props {
   url: string;
   title: string;
+  compact?: boolean;
 }
 
-export function ShareBar({ url, title }: Props) {
+export function ShareBar({ url, title, compact = false }: Props) {
   const [copied, setCopied] = useState(false);
   const e = encodeURIComponent;
   const links = [
@@ -20,6 +21,9 @@ export function ShareBar({ url, title }: Props) {
     try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch { /* ignore */ }
   };
 
+  const buttonSize = compact ? "size-8" : "size-9";
+  const iconSize = compact ? "size-3.5" : "size-4";
+
   return (
     <div className="flex items-center gap-2 flex-wrap" aria-label="Share this article">
       {links.map(({ name, href, Icon }) => (
@@ -29,17 +33,17 @@ export function ShareBar({ url, title }: Props) {
           target="_blank"
           rel="noopener noreferrer"
           aria-label={`Share on ${name}`}
-          className="size-9 inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full"
+          className={`${buttonSize} inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full`}
         >
-          <Icon className="size-4" />
+          <Icon className={iconSize} />
         </a>
       ))}
       <button
         onClick={copy}
         aria-label="Copy link"
-        className="size-9 inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full"
+        className={`${buttonSize} inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full`}
       >
-        {copied ? <Check className="size-4 text-primary" /> : <Link2 className="size-4" />}
+        {copied ? <Check className={`${iconSize} text-primary`} /> : <Link2 className={iconSize} />}
       </button>
     </div>
   );

@@ -1,6 +1,30 @@
 User-agent: *
 Allow: /
+
+# Block admin and system paths
+Disallow: /admin/
+Disallow: /api/
+Disallow: /_next/
 Disallow: /404
+Disallow: /search?q=*
+
+# Allow critical sitemap and feed endpoints
+Allow: /functions/v1/sitemap
+Allow: /functions/v1/news-sitemap
+Allow: /functions/v1/rss
+
+# Allow important bots full access
+User-agent: Googlebot
+Allow: /
+
+User-agent: Googlebot-News
+Allow: /
+
+User-agent: Googlebot-Image
+Allow: /
+
+User-agent: Bingbot
+Allow: /
 
 User-agent: GPTBot
 Allow: /
@@ -17,6 +41,23 @@ Allow: /
 User-agent: ClaudeBot
 Allow: /
 
+User-agent: Twitterbot
+Allow: /
+
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: LinkedInBot
+Allow: /
+
+User-agent: WhatsApp
+Allow: /
+
+# Crawl delay for less important bots
+User-agent: *
+Crawl-delay: 1
+
+# Sitemaps
 Sitemap: https://newssparkle.lovable.app/sitemap.xml
-Sitemap: https://newssparkle.lovable.app/functions/v1/sitemap
 Sitemap: https://newssparkle.lovable.app/functions/v1/news-sitemap
+Sitemap: https://newssparkle.lovable.app/category-sitemap.xml
