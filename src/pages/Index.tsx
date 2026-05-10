@@ -140,15 +140,86 @@ export default function Index() {
       <BreakingNewsTicker />
 
       {/* Hero Masthead */}
-      <section className="container-wide pt-12 sm:pt-16 pb-8">
-        <div className="text-center mb-8">
-          <div className="kicker text-primary mb-3">TODAY'S ISSUE · {todayLabel}</div>
-          <h1 className="headline-hero max-w-4xl mx-auto">
-            {SITE.name} — Breaking news, politics, business, tech <em className="not-italic text-primary font-serif italic">& more</em>
-          </h1>
-          <p className="mt-6 max-w-2xl mx-auto text-lg text-foreground/70 leading-relaxed">
-            {SITE.description}
-          </p>
+      <section className="container-wide pt-12 sm:pt-16 pb-6">
+        <div className="rounded-[2rem] border border-border bg-card/90 shadow-card p-6 sm:p-8 lg:p-10">
+          <div className="flex flex-col gap-10 lg:flex-row lg:items-start lg:justify-between">
+            <div className="max-w-3xl">
+              <div className="inline-flex items-center gap-3 rounded-full border border-primary/15 bg-primary/5 px-4 py-2 text-xs uppercase tracking-[0.35em] text-primary font-semibold">
+                <span className="inline-flex h-2.5 w-2.5 rounded-full bg-primary" /> LIVE NEWS
+              </div>
+              <div className="mt-6 flex flex-col gap-6">
+                <div>
+                  <span className="kicker text-primary">{todayLabel}</span>
+                  <h1 className="headline-hero max-w-3xl mt-4">
+                    {SITE.name} delivers premium journalism for fast-moving readers.
+                  </h1>
+                </div>
+                <p className="text-lg text-foreground/75 leading-relaxed max-w-2xl">
+                  {SITE.description} Search-friendly coverage, expert analysis, and newsroom accountability for readers who demand clarity without noise.
+                </p>
+                <div className="grid gap-3 sm:grid-cols-3 mt-6">
+                  <div className="rounded-3xl border border-border p-4 bg-background/90 shadow-sm">
+                    <p className="text-xs uppercase tracking-[0.28em] text-byline">Verified reporting</p>
+                    <p className="mt-2 font-semibold text-headline">Editorial fact checks</p>
+                  </div>
+                  <div className="rounded-3xl border border-border p-4 bg-background/90 shadow-sm">
+                    <p className="text-xs uppercase tracking-[0.28em] text-byline">Trusted reach</p>
+                    <p className="mt-2 font-semibold text-headline">High authority coverage</p>
+                  </div>
+                  <div className="rounded-3xl border border-border p-4 bg-background/90 shadow-sm">
+                    <p className="text-xs uppercase tracking-[0.28em] text-byline">Mobile-ready</p>
+                    <p className="mt-2 font-semibold text-headline">Fast, thumb-friendly layout</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4 min-w-[280px] lg:max-w-xs">
+              <div className="rounded-3xl border border-border bg-secondary/10 p-6">
+                <div className="flex items-center justify-between gap-4 mb-4">
+                  <span className="kicker text-primary uppercase">Top story</span>
+                  <span className="rounded-full bg-primary/10 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-primary font-semibold">Editor’s pick</span>
+                </div>
+                {hero ? (
+                  <Link to={`/post/${hero.slug}`} className="group block">
+                    <div className="aspect-[4/3] overflow-hidden rounded-3xl bg-muted">
+                      <img
+                        src={hero.featured_image_url}
+                        alt={hero.featured_image_alt || hero.title}
+                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
+                        loading="eager"
+                      />
+                    </div>
+                    <h2 className="mt-4 font-serif text-2xl font-black leading-tight text-headline group-hover:text-primary transition-colors">
+                      {hero.title}
+                    </h2>
+                    <p className="mt-3 text-sm text-foreground/70 leading-relaxed line-clamp-3">
+                      {hero.excerpt}
+                    </p>
+                  </Link>
+                ) : (
+                  <div className="h-56 rounded-3xl bg-muted animate-pulse" />
+                )}
+              </div>
+              <div className="rounded-3xl border border-border bg-background/95 p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <span className="kicker text-primary uppercase">Trending topics</span>
+                  <span className="text-xs uppercase tracking-[0.3em] text-byline">Now</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {trendingTags.slice(0, 7).map((tag) => (
+                    <Link
+                      key={tag}
+                      to={`/tag/${encodeURIComponent(tag)}`}
+                      className="rounded-full border border-border px-3 py-2 text-xs text-foreground/80 hover:border-primary hover:text-primary transition-colors"
+                    >
+                      {tag}
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 

@@ -23,8 +23,14 @@ export function Layout({ children }: { children: ReactNode }) {
       <Helmet>
         <script type="application/ld+json">{JSON.stringify(orgLd)}</script>
       </Helmet>
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:px-3 focus:py-2 focus:bg-card focus:text-foreground focus:border focus:border-primary rounded-md"
+      >
+        Skip to main content
+      </a>
       <Header />
-      <main className="flex-1 pb-16 md:pb-0">{children}</main>
+      <main id="main-content" className="flex-1 pb-16 md:pb-0">{children}</main>
       <Footer />
       <MobileBottomNav />
       <CookieConsent />

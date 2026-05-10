@@ -18,8 +18,8 @@ export function PostCard({ post, variant = "default" }: Props) {
 
   if (variant === "hero") {
     return (
-      <Link to={`/post/${post.slug}`} className="group block hover-lift">
-        <article className="grid lg:grid-cols-2 gap-6 lg:gap-10 items-center">
+      <Link to={`/post/${post.slug}`} aria-label={`Read article: ${post.title}`} className="group block hover-lift">
+        <article role="article" className="grid lg:grid-cols-2 gap-6 lg:gap-10 items-center">
           {post.featured_image_url && (
             <div className="aspect-16/9 overflow-hidden bg-muted rounded-lg">
               <OptimizedImage
@@ -96,8 +96,8 @@ export function PostCard({ post, variant = "default" }: Props) {
   }
 
   return (
-    <Link to={`/post/${post.slug}`} className="group block hover-lift">
-      <article className="card-base p-4 hover:shadow-lg transition-all duration-300">
+    <Link to={`/post/${post.slug}`} aria-label={`Read article: ${post.title}`} className="group block hover-lift">
+      <article role="article" className="card-base p-4 border border-border bg-card shadow-sm hover:shadow-lg transition-all duration-300">
         {post.featured_image_url && (
           <div className="aspect-16/9 overflow-hidden bg-muted rounded-lg mb-4">
             <OptimizedImage

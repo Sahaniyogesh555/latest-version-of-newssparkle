@@ -21,21 +21,26 @@ export function Header() {
   return (
     <header className="border-b border-border bg-background sticky top-0 z-40 backdrop-blur supports-[backdrop-filter]:bg-background/85">
       <div className="container-wide">
-        <div className="flex items-center justify-between py-5 sm:py-6">
+        <div className="flex flex-col gap-2 py-5 sm:py-6 md:flex-row md:items-center md:justify-between">
           <Link
             to="/"
             aria-label={`${SITE.name} — home`}
-            className="flex items-baseline gap-1.5 select-none"
+            className="flex flex-col sm:flex-row sm:items-end gap-1.5 select-none"
             style={{ fontFamily: "'Fraunces', Georgia, serif" }}
           >
-            <span className="text-xl sm:text-2xl md:text-[28px] font-black tracking-tight text-headline">
-              {brandLead}
-            </span>
-            {brandAccent && (
-              <span className="text-xl sm:text-2xl md:text-[28px] font-black tracking-tight text-primary">
-                {brandAccent}
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-xl sm:text-2xl md:text-[28px] font-black tracking-tight text-headline">
+                {brandLead}
               </span>
-            )}
+              {brandAccent && (
+                <span className="text-xl sm:text-2xl md:text-[28px] font-black tracking-tight text-primary">
+                  {brandAccent}
+                </span>
+              )}
+            </div>
+            <span className="mt-1 text-[11px] uppercase tracking-[0.36em] text-byline hidden sm:block">
+              {SITE.tagline}
+            </span>
           </Link>
 
           <nav className="hidden md:flex items-center gap-8">
