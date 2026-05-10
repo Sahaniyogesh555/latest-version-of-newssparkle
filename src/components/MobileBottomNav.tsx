@@ -14,7 +14,12 @@ export function MobileBottomNav() {
   const location = useLocation();
 
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-background/95 backdrop-blur-sm border-t border-border z-50">
+    <nav
+      role="navigation"
+      aria-label="Mobile navigation"
+      className="md:hidden fixed bottom-0 left-0 right-0 bg-background/95 backdrop-blur-sm border-t border-border z-50"
+      style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+    >
       <div className="flex items-center justify-around px-2 py-2">
         {navItems.map(({ icon: Icon, label, href }) => {
           const isActive = location.pathname === href ||

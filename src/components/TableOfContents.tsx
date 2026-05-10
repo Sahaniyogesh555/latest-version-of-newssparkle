@@ -35,24 +35,35 @@ export function TableOfContents() {
     });
 
     setHeadings(extracted);
+    if (headingElements.length > 0 && window.innerWidth >= 1024) {
+      setIsOpen(true);
+    }
   }, []);
 
   useEffect(() => {
-    // Track active heading
-    const handleScroll = () => {
-      const headingElements = headings.map((h) =>
-        document.getElementById(h.id)
-      );
-      const current = headingElements.find((el) => {
-        if (!el) return false;
-        const rect = el.getBoundingClientRect();
-        return rect.top > 0 && rect.top < window.innerHeight / 2;
-      });
-      if (current) setActiveId(current.id);
-    };
+    if (!headings.length) return;
 
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => window.removeEventListener("scroll", handleScroll);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visibleEntry = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (visibleEntry?.target.id) {
+          setActiveId(visibleEntry.target.id);
+        }
+      },
+      {
+        rootMargin: "-35% 0px -50% 0px",
+        threshold: 0.15,
+      }
+    );
+
+    headings.forEach((heading) => {
+      const element = document.getElementById(heading.id);
+      if (element) observer.observe(element);
+    });
+
+    return () => observer.disconnect();
   }, [headings]);
 
   if (headings.length < 2) return null;

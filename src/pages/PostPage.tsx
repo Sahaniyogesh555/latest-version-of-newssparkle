@@ -186,7 +186,7 @@ export default function PostPage() {
         jsonLd={jsonLd}
       />
 
-      <article className="min-h-screen">
+      <article className="min-h-screen" aria-labelledby="article-title">
         {/* Article Header */}
         <header className="bg-gradient-to-b from-secondary/30 via-secondary/10 to-transparent border-b border-border/50">
           <div className="container-prose py-12 sm:py-16">
@@ -222,7 +222,7 @@ export default function PostPage() {
             )}
 
             {/* Main headline */}
-            <h1 className="headline-hero text-left mb-8 leading-[1.1] tracking-tight">
+            <h1 id="article-title" className="headline-hero text-left mb-8 leading-[1.1] tracking-tight">
               {post.title}
             </h1>
 
@@ -349,7 +349,7 @@ export default function PostPage() {
                 Advertisement
               </div>
 
-              <div className="prose-article">
+              <section aria-label="Article body" className="prose-article">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
@@ -395,7 +395,7 @@ export default function PostPage() {
                 >
                   {post.content}
                 </ReactMarkdown>
-              </div>
+              </section>
 
               {/* Key takeaways */}
               {post.key_takeaways && post.key_takeaways.length > 0 && (

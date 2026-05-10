@@ -43,7 +43,7 @@ export function Header() {
             </span>
           </Link>
 
-          <nav className="hidden md:flex items-center gap-8">
+          <nav aria-label="Primary navigation" className="hidden md:flex items-center gap-8">
             {CATEGORIES.map(c => (
               <NavLink
                 key={c.slug}
@@ -72,6 +72,12 @@ export function Header() {
             >
               {theme === "dark" ? <Sun className="size-5" /> : <Moon className="size-5" />}
             </button>
+            <Link
+              to="/about"
+              className="hidden md:inline-flex items-center justify-center rounded-full border border-border bg-background px-4 py-2 text-sm font-semibold text-headline hover:border-primary hover:text-primary transition-colors"
+            >
+              About
+            </Link>
             <LanguageToggle />
             <button
               className="md:hidden p-1.5 -mr-1.5"

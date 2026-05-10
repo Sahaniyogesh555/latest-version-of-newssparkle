@@ -248,9 +248,14 @@ export default function Index() {
 
       {/* Latest News Feed */}
       {latest.length > 0 && (
-        <section className="container-wide py-12 sm:py-16">
-          <div className="flex items-baseline justify-between mb-10 pb-4 border-b border-rule">
-            <h2 className="headline-lg">Latest Stories</h2>
+        <section className="container-wide py-12 sm:py-16" aria-live="polite">
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between mb-10 pb-4 border-b border-rule">
+            <div>
+              <h2 className="headline-lg">Latest Stories</h2>
+              <p className="text-sm text-foreground/70 mt-2 max-w-2xl">
+                Fresh coverage updated throughout the day, with fast access to the newest stories and verified context.
+              </p>
+            </div>
             <span className="kicker text-byline hidden sm:inline">
               Updated continuously
             </span>
@@ -270,18 +275,28 @@ export default function Index() {
                 ))}
               </div>
               <div ref={sentinelRef} aria-hidden className="h-10 mt-10" />
-              {loadingMore && (
-                <div className="mt-10 grid gap-10 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
-                  {[...Array(3)].map((_, i) => (
-                    <div key={i} className="h-80 bg-muted rounded-lg" />
-                  ))}
-                </div>
-              )}
-              {!hasMore && latest.length > 0 && (
-                <p className="text-center text-byline text-sm uppercase tracking-wider mt-12">
-                  — End of feed —
-                </p>
-              )}
+              <div className="mt-10 flex flex-col items-center gap-4">
+                {hasMore && !loadingMore ? (
+                  <button
+                    onClick={loadMore}
+                    className="inline-flex items-center justify-center rounded-full border border-primary bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+                  >
+                    Load more stories
+                  </button>
+                ) : null}
+                {loadingMore && (
+                  <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3 animate-pulse w-full">
+                    {[...Array(3)].map((_, i) => (
+                      <div key={i} className="h-80 bg-muted rounded-lg" />
+                    ))}
+                  </div>
+                )}
+                {!hasMore && latest.length > 0 && (
+                  <p className="text-center text-byline text-sm uppercase tracking-wider mt-4">
+                    — You’ve reached the latest coverage —
+                  </p>
+                )}
+              </div>
             </>
           )}
         </section>
