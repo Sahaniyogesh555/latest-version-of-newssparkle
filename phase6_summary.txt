@@ -1,0 +1,242 @@
+PHASE 6 — AUTONOMOUS NEWSROOM
+============================
+Status: complete (code + tests). SQL migrations still need to be applied to the
+live Supabase project — see "Before you switch it on".
+
+
+1. GAPS FOUND IN THE OLD AUTOMATION
+-----------------------------------
+- One function did everything: source → LLM → INSERT → live. No validation, no
+  scoring, no second opinion. A bad model response went straight to readers.
+- No deduplication beyond a 7-day title match, no cross-source corroboration,
+  no fingerprinting. The same wire story could be rewritten repeatedly.
+- No scheduling brain: 3 runs/day × 6 categories inserted 18 posts at once,
+  all with the same timestamp. No caps, no spacing, no burst protection.
+- Candidate queue did not exist. Feeds were fetched inside the writer, so a dead
+  feed was only noticed when a category produced nothing.
+- Failures were invisible: no retries, no circuit breaker, no alerting, no
+  run telemetry. A silent outage looked like a quiet news day.
+- Statuses were binary (published or nothing): no review lane, no scheduling,
+  no archive. Nothing to hold a doubtful draft.
+- Images: cascade with no alt-text strategy, no licence credit, no repair path
+  for an image that later 404s.
+- No trends, no content gaps, no maintenance, no self-check endpoint.
+
+
+2. SYSTEMS ADDED
+----------------
+Schema (20261016090000_phase6_autonomy_schema.sql)
+  content_sources, ingested_items, topic_trends, pipeline_runs, agent_alerts,
+  content_health_checks + 17 new columns on posts (quality, provenance,
+  scheduling, retry state) and 6 service-role RPCs. 24 trusted feeds seeded
+  (wires first, then outlets, then specialists). All automation tables are
+  service-role only: anon/authenticated can read nothing.
+
+Shared logic (21 modules in supabase/functions/_shared, ~6.7k lines)
+  text, dedupe, classify, safety, facts, quality, seo, schedule, retry,
+  sources, images, trends, maintenance, ai, db, pipeline, plus the existing
+  auth/http/site helpers. Pure functions, unit tested, no Deno APIs — that is
+  why the pipeline can be exercised in CI without a running Supabase.
+
+Functions (6 new, 1 rewritten)
+  ingest-feeds (*/20)      feeds → validated + deduplicated candidates
+  write-desk (*/30)        rewrite → verify → score → schedule or hold
+  publish-scheduler (*/10) releases due posts under the caps
+  trend-watch (15 */3)     trend scores + content gaps
+  maintenance (40 * * * *) images, links, endpoints, orphans, stale posts
+  phase6-monitor (5,35)    health snapshot + alerts (safe to poll)
+  auto-publish (3×/day)    edition orchestrator: ingest → write → publish
+
+  Every one requires the automation secret. 14 cron jobs scheduled in
+  20261016090100_phase6_autonomy_crons.sql (the old schedule is replaced).
+  A test asserts every cron target exists as a function and is declared in
+  supabase/config.toml, so a rename cannot silently break the loop.
+
+
+3. PIPELINE
+-----------
+Source → extraction → rewrite → verification → SEO → quality → candidate →
+schedule → publish. Each stage has an output the next stage can reject.
+
+- The writer only ever sees the source digest and is told, in the system prompt,
+  that it may not invent figures, quotes, names or dates and may not copy
+  sentences. Facts available to it are listed explicitly (the numbers the
+  sources actually contain).
+- A second model pass checks the draft against the same sources and returns a
+  verdict. "Cannot confirm" is never treated as "fine": the draft is held.
+- Every fact-checkable figure in the draft is compared with the sources;
+  unsupported figures are surfaced to the reviewer and block publication when
+  they dominate the copy.
+- If the AI is unavailable, the key is missing, or the daily budget is spent,
+  the desk stops and raises an alert. It never falls back to a template, a
+  scrape or a guess.
+
+
+4. SEO
+------
+Slug, meta title, meta description, keywords, excerpt, OG/JSON-LD fields and a
+schema block are generated and validated in one pass: length limits, keyword
+count, keyword density, clickbait, truncated headlines, publisher suffixes and
+"shouty" copy are all checked, and non-compliant fields are regenerated rather
+than published. Model copy is de-hyped ("slams" → "criticises") before it ships.
+Internal linking is tracked by the maintenance sweep (orphan stories get
+suggestions).
+
+
+5. QUALITY CONTROL
+------------------
+0–100 score with a published breakdown: completeness 20, readability 15,
+structure 15, SEO 15, trust 15, factual 10, originality 10.
+>=75 publish · 55–74 review · <55 reject, plus hard blocks that override any
+score: safety-critical content, plagiarism, duplicate of a published story,
+truncated body, unsupported figures, model could not verify. Held drafts keep
+their reasons in posts.review_reason so a human can decide in seconds.
+Safety gates cover incitement, hate generalisation, self-harm, exploitation,
+medical advice, financial promises, election deception, unattributed criminal
+allegations (escalated to critical), rumour framing, spam and clickbait.
+
+
+6. DUPLICATES
+-------------
+Four layers, cheapest first: normalised-title fingerprint (catches the same
+wire story across feeds and now counts corroboration), title similarity
+(containment + word order + shared opening phrase), 4-gram shingle overlap for
+full bodies, and a 64-bit simhash stored per post as a cheap archive prefilter.
+Thresholds are calibrated against labelled sample pairs and asserted in tests:
+a light-edit rewrite scores 0.78 (blocked), a genuinely re-reported story 0.00
+(published). Duplicate candidates are skipped with an alert, never rewritten.
+
+
+7. TRENDS
+---------
+Public trend feeds are scored (traffic, freshness, corroboration) and matched
+against the queue using rarity-weighted tokens, so "energy price cap" boosts a
+queued energy story but does not link to an unrelated "streaming price rise".
+Trends only reprioritise work the desk already had. Topics with nothing queued
+become content-gap notes, and anything already published today is dropped — the
+design goal is no trend spam.
+
+
+8. MAINTENANCE
+--------------
+Hourly sweep: repairs missing or broken featured images (provider cascade, then
+a deterministic placeholder), archives old low-traffic posts, checks outbound
+links, verifies sitemap/news-sitemap/RSS freshness and item counts, finds orphan
+stories, flags padded copy, and records everything in content_health_checks.
+Safe fixes are applied automatically; anything needing judgement becomes an
+alert instead.
+
+
+9. FAILURE RECOVERY
+-------------------
+Bounded retries with exponential backoff and jitter, timeouts on every outbound
+call, circuit breakers per dependency, feed health with exponential cooldowns
+(6h → 72h) and alerts when a feed is parked, candidate retry/defer (attempt,
+next_attempt_at, last_error) with three strikes, publish failures alerted as
+critical, and per-run telemetry (items in/out, LLM calls, duration, metrics).
+
+
+10. RESOURCE EFFICIENCY
+-----------------------
+Daily LLM budget (220 calls) enforced before the desk runs, per-run caps
+(4 stories), 12 items per feed per run, 24 sources fanned out with bounded
+concurrency, 36-hour candidate expiry, 30-day run retention, 60/90-day alert and
+view-event pruning, 4-gram shingles instead of full-text comparisons, and a
+simhash prefilter for the archive. All cron intervals are minutes-scale with
+90–300s function timeouts.
+
+
+11. VERIFICATION RESULTS
+------------------------
+npm run verify ......................... PASS (exit 0)
+  typecheck (tsc -b) ................... PASS
+  lint (eslint) ........................ PASS, 0 warnings
+  tests ................................ 166 passed / 10 files
+  build ................................ PASS, dist 3.0 MB (CI budget 4 MB)
+
+Test coverage added in Phase 6 (114 new tests):
+  phase6-content      text metrics, dedupe calibration, classification, SEO
+  phase6-gates        safety, fact consistency, quality, scheduling, retry,
+                      feed hygiene
+  phase6-ai           prompt building, response parsing, transport failures,
+                      replayed against recorded model output (good, fenced,
+                      truncated, hallucinated figures, unparseable, refusal)
+  phase6-orchestration  the six pipeline runners end to end against an
+                      in-memory database and a fake network, including the
+                      "stop rather than invent" paths
+  repo-integrity      cron → function → config.toml alignment, auth on every
+                      write-capable endpoint
+
+What was NOT executed here: the two SQL migrations (no Postgres/Docker in this
+environment) and the Deno runtime (no deno binary). The SQL was written to be
+idempotent (create if not exists, drop constraint if exists, unschedule by name
+first) and reviewed line by line; the functions are typechecked with strict
+settings and their logic is covered by the tests above, but first contact with a
+live project should be done in staging with the monitor open.
+
+
+12. ESTIMATED AUTONOMY
+----------------------
+~90% of the publishing loop is unattended and self-correcting today: sourcing,
+validation, writing, fact-checking, scoring, deduplication, SEO, imaging,
+scheduling, publishing, maintenance, recovery and monitoring.
+
+The remaining ~10% is human work that is deliberately not automated:
+  - Review queue: uncertain drafts are held with reasons but there is no UI yet
+    (read posts where status = 'review').
+  - Subjective calls: a held draft needs a decision, and nothing will publish it
+    on its own.
+  - Configuration: keys (AI, Unsplash/Pexels), the Vault secret, and applying
+    the migrations.
+  - Cost/quality tuning: thresholds are calibrated and documented, but they
+    should be revisited against real output in the first two weeks.
+
+Practical expectation once switched on: ~10–18 published stories/day at a
+quality score of 75+, section-balanced, with 1–3 drafts a day landing in review
+and critical alerts only when something structural breaks (no key, no feeds,
+no candidates, publishing stalled).
+
+
+13. REMAINING RISKS
+-------------------
+1. Migrations not yet applied / not yet run against real Postgres. Highest risk
+   item; verify in staging first (see "Before you switch it on").
+2. AI dependency: a provider outage or an exhausted budget pauses writing (it
+   does not degrade to scraping). Publish cadence then depends on the review
+   queue being empty.
+3. Model output quality drift: thresholds are calibrated to today's model. Re-run
+   the fixtures when the model changes; the recorded-response tests will show
+   behavioural shifts.
+4. Image licensing: without Unsplash/Pexels keys, images are placeholders, and
+   placeholder-heavy sections look thin. Keys are the fix, not more automation.
+5. Semantic dedupe is statistical: a genuinely re-reported story can score close
+   to threshold. The cost of a false positive is a skipped story (safe), the cost
+   of a false negative is a rewrite of published copy (visible) — the thresholds
+   lean towards skipping.
+6. Trend feeds are noisy by design; scoring + rarity matching + the "already
+   covered" check limit the damage, and trends cannot create a story on their own.
+7. The front end still renders client-side, so social unfurlers see the generic
+   card. That is a Phase 8 item, unrelated to this automation.
+
+
+14. BEFORE YOU SWITCH IT ON
+---------------------------
+1. Apply the migrations in order:
+     20261016090000_phase6_autonomy_schema.sql
+     20261016090100_phase6_autonomy_crons.sql
+   (the second one unschedules the old jobs and installs the new loop)
+2. Set the secrets (see .env.example / docs/OPERATIONS.md §2):
+     AUTO_PUBLISH_SECRET      must match the Vault value `auto_publish_secret`
+     LOVABLE_API_KEY          (or OPENAI_API_KEY / AI_API_KEY)
+     AI_BASE_URL, AI_MODEL    optional, defaults to OpenAI + gpt-4o-mini
+     SITE_URL                 canonical origin
+     UNSPLASH_ACCESS_KEY, PEXELS_API_KEY   optional but recommended
+   Also confirm Vault holds `newsroom_base_url`
+   (default https://ruusbjlabbojpbawbphc.supabase.co).
+3. Deploy the functions:
+     supabase functions deploy ingest-feeds write-desk publish-scheduler \
+       trend-watch maintenance phase6-monitor auto-publish
+4. Smoke-test each stage by hand (docs/OPERATIONS.md §3), then watch
+     select * from public.pipeline_runs order by started_at desc limit 20;
+5. Point an uptime check at phase6-monitor: 200 with ok:true means the newsroom
+   is publishing unattended.

@@ -40,8 +40,8 @@ function fireBrowserNotification(a: AlertRow) {
       a.kind === "breaking" ? `🚨 Breaking: ${a.title}` : `🔥 Trending: ${a.title}`,
       {
         body: a.excerpt ?? "",
-        icon: a.image_url ?? "/logo.svg",
-        badge: "/logo.svg",
+        icon: a.image_url ?? "/icon-192.png",
+        badge: "/icon-192.png",
         tag: `news-${a.id}`,
       },
     );

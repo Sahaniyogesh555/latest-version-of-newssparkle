@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, Navigate, Link, useSearchParams } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
@@ -29,22 +30,22 @@ export default function CategoryPage() {
     setLoading(true);
     const from = (page - 1) * PAGE_SIZE;
     const to = from + PAGE_SIZE - 1;
-    supabase.from("posts").select("*", { count: "exact" }).eq("category_slug", slug).eq("status", "published")
+    supabase.from("posts").select(POST_CARD_COLUMNS, { count: "exact" }).eq("category_slug", slug).eq("status", "published")
       .order("published_at", { ascending: false }).range(from, to)
       .then(({ data, count }) => {
-        setPosts((data as Post[]) || []);
+        setPosts(normalizePosts(data));
         setTotal(count || 0);
         setLoading(false);
         if (page > 1) window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
       });
 
-    supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
+    supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published").neq("category_slug", slug)
       .order("views", { ascending: false }).limit(6)
-      .then(({ data }) => setTrending((data as Post[]) || []));
+      .then(({ data }) => setTrending(normalizePosts(data)));
 
-    supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
+    supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published").neq("category_slug", slug)
       .order("published_at", { ascending: false }).limit(120)
-      .then(({ data }) => setOtherPool((data as Post[]) || []));
+      .then(({ data }) => setOtherPool(normalizePosts(data)));
   }, [slug, page]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -123,7 +124,7 @@ export default function CategoryPage() {
       .map(x => x.post);
 
     return scored;
-  }, [posts, otherPool, slug]);
+  }, [posts, otherPool]);
 
 
   if (!cat) return <Navigate to="/404" replace />;

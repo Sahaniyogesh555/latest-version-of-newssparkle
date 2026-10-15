@@ -1,0 +1,76 @@
+# PENDING INSTALL — copy to .github/workflows/ci.yml
+#
+# This is the CI definition (typecheck -> lint -> test -> build, with a 4 MiB
+# dist budget). It lives here rather than in .github/workflows because the
+# GitHub App installation used to push this repository does not hold the
+# `workflows` permission, so any commit that creates or edits a file under
+# .github/workflows is rejected by GitHub.
+#
+# To activate it, copy this file to .github/workflows/ci.yml and commit it with
+# an account/token that has the `workflows` scope (the GitHub web UI works too).
+# Until then `npm run verify` is the same gate, run locally.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck · Lint · Test · Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Kept separate from `npm run build` so a type error is reported as a type
+      # error rather than a mystery build failure.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          # Public, client-side values only — no secrets belong in a Vite build.
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://ruusbjlabbojpbawbphc.supabase.co' }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          VITE_SITE_URL: ${{ vars.VITE_SITE_URL || 'https://newssparkle.lovable.app' }}
+
+      - name: Check the production bundle stayed within budget
+        run: |
+          echo "--- built assets ---"
+          du -h dist/assets/*.js dist/assets/*.css | sort -h
+          total=$(du -sk dist | cut -f1)
+          echo "dist total: ${total} KiB"
+          # Guards against accidental re-bundling of the whole media library.
+          if [ "$total" -gt 4096 ]; then
+            echo "::error::dist grew beyond 4 MiB (${total} KiB) — check for accidentally imported assets"
+            exit 1
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7

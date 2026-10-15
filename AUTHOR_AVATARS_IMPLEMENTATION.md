@@ -1,5 +1,10 @@
 # Author Avatar Implementation Summary
 
+> ⚠️ **Historical document.** Written before the code was audited: some claims
+> below (notably "ZERO ERRORS") did not match the code, and the issues were
+> fixed in the remediation phase. See [`docs/PHASES.md`](docs/PHASES.md) for the
+> accurate build history and [`REPO_ANALYSIS.md`](REPO_ANALYSIS.md) for findings.
+
 ## Overview
 Successfully extracted, cropped, and integrated professional author avatars from the group image (`src/assets/export.png`) into the NewsSparkle website.
 

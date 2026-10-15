@@ -7,6 +7,7 @@ import { PushNotificationsPrompt } from "./PushNotificationsPrompt";
 import { BackToTop } from "./BackToTop";
 import { BreakingNewsAlerts } from "./BreakingNewsAlerts";
 import { MobileBottomNav } from "./MobileBottomNav";
+import { DemoModeBanner } from "./DemoModeBanner";
 import { SITE } from "@/lib/site";
 
 export function Layout({ children }: { children: ReactNode }) {
@@ -29,6 +30,7 @@ export function Layout({ children }: { children: ReactNode }) {
       >
         Skip to main content
       </a>
+      <DemoModeBanner />
       <Header />
       <main id="main-content" className="flex-1 pb-16 md:pb-0">{children}</main>
       <Footer />

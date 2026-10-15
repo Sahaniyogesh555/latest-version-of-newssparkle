@@ -4,6 +4,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
+import { POST_CARD_COLUMNS, POST_FULL_COLUMNS, normalizePost, normalizePosts } from "@/lib/posts";
+import { getVisitorId } from "@/lib/visitor";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
@@ -12,6 +14,7 @@ import { ShareBar } from "@/components/ShareBar";
 import { StickyShareBar } from "@/components/StickyShareBar";
 import { BookmarkButton } from "@/components/BookmarkButton";
 import { OptimizedImage } from "@/components/OptimizedImage";
+import { AuthorImage } from "@/components/AuthorImage";
 import { TableOfContents } from "@/components/TableOfContents";
 import { RelatedArticles } from "@/components/RelatedArticles";
 import { TrendingSidebar } from "@/components/TrendingSidebar";
@@ -28,40 +31,84 @@ export default function PostPage() {
   const [related, setRelated] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!slug) return;
+    let cancelled = false;
     setLoading(true);
     setNotFound(false);
+    setError(null);
+    window.scrollTo(0, 0);
+
     (async () => {
-      const { data } = await supabase
+      const { data, error: fetchError } = await supabase
         .from("posts")
-        .select("*")
+        .select(POST_FULL_COLUMNS)
         .eq("slug", slug)
         .eq("status", "published")
         .maybeSingle();
+
+      if (cancelled) return;
+
+      if (fetchError) {
+        setError(fetchError.message);
+        setLoading(false);
+        return;
+      }
       if (!data) {
         setNotFound(true);
         setLoading(false);
         return;
       }
-      setPost(data as Post);
+
+      const current = normalizePost(data);
+      setPost(current);
       setLoading(false);
-      supabase.rpc("increment_post_views", { post_slug: slug });
+
+      // Feeds the "Continue reading" rail on the homepage.
+      try {
+        localStorage.setItem("lastViewedPost", current.slug);
+      } catch {
+        /* storage unavailable (private mode) — the rail simply stays hidden */
+      }
+
+      // Fire-and-forget: the counter is de-duplicated server-side per visitor/day.
+      supabase
+        .rpc("increment_post_views", { post_slug: slug, visitor_id: getVisitorId() })
+        .then(({ error: rpcError }) => {
+          if (rpcError) console.warn("[views] increment failed:", rpcError.message);
+        });
+
       const { data: rel } = await supabase
         .from("posts")
-        .select("*")
-        .eq("category_slug", (data as Post).category_slug)
+        .select(POST_CARD_COLUMNS)
+        .eq("category_slug", current.category_slug)
         .eq("status", "published")
-        .neq("id", (data as Post).id)
+        .neq("id", current.id)
         .order("published_at", { ascending: false })
         .limit(6);
-      setRelated((rel as Post[]) || []);
-      window.scrollTo(0, 0);
+      if (!cancelled) setRelated(normalizePosts(rel));
     })();
+
+    return () => { cancelled = true; };
   }, [slug]);
 
   if (notFound) return <Navigate to="/404" replace />;
+
+  if (error)
+    return (
+      <Layout>
+        <div className="container-prose py-24 text-center">
+          <div className="kicker text-primary mb-3">Temporary problem</div>
+          <h1 className="headline-lg mb-4">We could not load this story</h1>
+          <p className="text-foreground/70 mb-8">
+            {error} — please refresh, or head back to the front page.
+          </p>
+          <Link to="/" className="btn-primary inline-flex px-6 py-3">Back to homepage</Link>
+        </div>
+      </Layout>
+    );
   if (loading || !post)
     return (
       <Layout>
@@ -130,13 +177,6 @@ export default function PostPage() {
       "@type": "Thing",
       name: keyword
     })),
-    aggregateRating: post.views ? {
-      "@type": "AggregateRating",
-      ratingValue: Math.min(5, Math.max(1, Math.round((post.views / 1000) * 5))), // Scale views to 1-5 rating
-      reviewCount: post.views,
-      bestRating: 5,
-      worstRating: 1
-    } : undefined,
   };
 
   const breadcrumbLd = {

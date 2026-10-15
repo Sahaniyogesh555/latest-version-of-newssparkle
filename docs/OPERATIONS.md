@@ -1,0 +1,352 @@
+# Operations
+
+Everything an operator needs to deploy, configure and run NewsSparkle.
+
+---
+
+## 1. Deploy checklist
+
+```bash
+# 1. Front end
+npm ci && npm run verify            # typecheck + lint + test + build
+# deploy `dist/` to the host (Lovable / Vercel / Netlify / Cloudflare Pages)
+
+# 2. Database
+supabase link --project-ref <project-ref>
+supabase db push                    # applies supabase/migrations
+
+# 3. Functions
+npm run check:functions             # real `deno check` on every entrypoint
+                                    # (skipped when deno is not installed)
+supabase functions deploy           # deploys every function in supabase/config.toml
+```
+
+Before `supabase db push` runs against a live project, the migrations can be
+replayed locally against a real PostgreSQL (WASM) engine:
+
+```bash
+npx vitest run src/test/phase6-sql.test.ts
+```
+
+That applies `supabase/migrations/*.sql` in order and asserts the resulting
+schema, RLS state, RPCs and the 14 cron jobs — the same SQL that `db push`
+sends, minus the platform-only extensions (pg_cron / pg_net / pgcrypto).
+
+
+### Hosting requirements
+
+The front end is a single-page app. Whatever host serves it **must** rewrite
+unknown paths to `/index.html`, otherwise deep links such as
+`/post/<slug>` return a 404 on refresh. Examples:
+
+```
+# Netlify  (public/_redirects)
+/*    /index.html   200
+
+# Vercel   (vercel.json)
+{ "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }] }
+```
+
+The sitemap and feeds live on the Supabase domain and need no host rewrite:
+
+| Endpoint | URL |
+| --- | --- |
+| Sitemap index | `https://<project-ref>.supabase.co/functions/v1/sitemap` |
+| Google News sitemap | `https://<project-ref>.supabase.co/functions/v1/news-sitemap` |
+| RSS | `https://<project-ref>.supabase.co/functions/v1/rss` |
+
+---
+
+## 2. Secrets
+
+### Generated automation secret
+
+Every automation endpoint rejects unauthenticated calls: `auto-publish`,
+`breaking-news-monitor`, `notifications-dispatcher`, `validate-feeds` and the
+Phase 6 newsroom functions (`ingest-feeds`, `write-desk`, `publish-scheduler`,
+`trend-watch`, `maintenance`, `phase6-monitor`). They accept
+`Authorization: Bearer <secret>`, `x-cron-secret: <secret>`, or the service-role
+key.
+
+The same secret has to exist in **two** places, because pg_cron runs inside the
+database:
+
+```bash
+# a) Vault (read by the trigger functions at run time)
+openssl rand -hex 32          # keep the value
+# SQL editor:
+#   select vault.create_secret('<value>', 'auto_publish_secret', 'NewsSparkle automation');
+
+# b) Function secrets
+supabase secrets set AUTO_PUBLISH_SECRET=<same value>
+supabase secrets set SITE_URL=https://newssparkle.lovable.app
+supabase secrets set LOVABLE_API_KEY=<AI gateway key>
+supabase secrets set GNEWS_API_KEY=<optional>
+supabase secrets set NEWSAPI_KEY=<optional>
+supabase secrets set SERPAPI_KEY=<optional>
+supabase secrets set UNSPLASH_ACCESS_KEY=<optional: topic-relevant images>
+supabase secrets set PEXELS_API_KEY=<optional: image fallback>
+```
+
+### Second Vault entry: the newsroom base URL
+
+The Phase 6 cron wrappers build their function URL from Vault as well, so the
+database never has to hard-code a host:
+
+```sql
+-- defaults to https://<project-ref>.supabase.co when absent
+select vault.create_secret('https://<project-ref>.supabase.co', 'newsroom_base_url',
+                           'NewsSparkle automation host');
+```
+
+Both names are read on every run:
+
+| Vault name | Used for | If it is missing |
+| --- | --- | --- |
+| `auto_publish_secret` | `Authorization: Bearer` header | cron calls return **401** and log a warning |
+| `newsroom_base_url` | `net.http_post` target | falls back to the project URL |
+
+Every targeted function name is rejected if it is not in the migration's
+allow-list, so a typo in a cron job cannot make the database call an arbitrary
+endpoint.
+
+
+### Rotate the legacy anon key
+
+Migration `20260503120747_…` (from the project's first iteration) contains a
+long-lived anon JWT in plain SQL, and it pointed at a **different** project ref
+than the rest of the repo. Treat that key as compromised:
+
+1. Supabase dashboard → Settings → API → **Rotate** the anon key.
+2. Update `VITE_SUPABASE_PUBLISHABLE_KEY` in `.env` and in the host's build env.
+3. The current key is also fine to rotate on the same schedule as any other
+   credential.
+
+The old migration is left in place because applied migrations are historical
+records; the rescheduled jobs in `20261015120200_…` supersede it.
+
+---
+
+## 3. Scheduled jobs
+
+Phase 6 replaces the old schedule with a closed loop: ingest → write → publish,
+plus trend watching, maintenance and a health monitor. See
+`supabase/migrations/20261016090100_phase6_autonomy_crons.sql`.
+
+| Job | Schedule (UTC) | Function | Notes |
+| --- | --- | --- | --- |
+| `ingest-feeds` | `*/20 * * * *` | `ingest-feeds` | feeds → validated, deduplicated candidates |
+| `write-desk` | `*/30 * * * *` | `write-desk` | rewrite → verify → score → schedule/review |
+| `publish-scheduler` | `*/10 * * * *` | `publish-scheduler` | releases due posts under the caps |
+| `trend-watch` | `15 */3 * * *` | `trend-watch` | trend scores + content-gap notes |
+| `newsroom-maintenance` | `40 * * * *` | `maintenance` | images, links, endpoints, orphans, stale posts |
+| `phase6-monitor` | `5,35 * * * *` | `phase6-monitor` | health snapshot + alerts (safe to poll) |
+| `auto-publish-morning` | `0 6 * * *` | `auto-publish` | edition orchestrator (ingest + write + publish) |
+| `auto-publish-midday` | `0 12 * * *` | `auto-publish` | edition orchestrator |
+| `auto-publish-evening` | `0 18 * * *` | `auto-publish` | edition orchestrator |
+| `breaking-news-monitor` | `*/30 * * * *` | `breaking-news-monitor` | triggers the orchestrator on a new headline |
+| `notifications-dispatcher` | `*/10 * * * *` | `notifications-dispatcher` | idempotent per slug/kind/day |
+| `validate-feeds-daily` | `30 4 * * *` | `validate-feeds` | feed report |
+| `prune-post-view-events` | `15 3 * * *` | SQL | 90-day retention |
+| `prune-automation` | `25 3 * * *` | SQL | prunes candidates, runs, alerts, trends |
+
+Inspect:
+
+```sql
+select jobname, schedule, active from cron.job order by jobname;
+select status, status_code, left(content, 200), created
+  from net._http_response order by created desc limit 10;
+```
+
+### Pause and resume
+
+`cron.alter_job` flips a job on or off without deleting it, so pausing is always
+reversible. Everything below is safe to run while the newsroom is live.
+
+```sql
+-- Pause only what writes or publishes; ingest and the monitor keep running so
+-- you still see candidates arriving and health alerts.
+select cron.alter_job(jobid, active := false)
+  from cron.job
+ where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
+                   'auto-publish-midday','auto-publish-evening',
+                   'breaking-news-monitor','notifications-dispatcher');
+
+-- Pause the entire loop (nothing is deleted, no post is lost).
+select cron.alter_job(jobid, active := false) from cron.job;
+
+-- Resume.
+select cron.alter_job(jobid, active := true) from cron.job;
+```
+
+`cron.unschedule('jobname')` is the permanent version and is what the migration
+uses before it re-creates a job.
+
+### First activation (the Phase 6.1 gate)
+
+The migration creates every job **active**, so `supabase db push` starts the
+loop. Do this in order, on a project that has never run Phase 6 before:
+
+```bash
+# 1. Apply the migrations, then immediately pause publishing.
+supabase db push
+#    SQL editor: run the first alter_job block above (writes + publishing only).
+
+# 2. Secrets — the same value in Vault and in the function environment.
+openssl rand -hex 32
+#    SQL: select vault.create_secret('<value>', 'auto_publish_secret', 'NewsSparkle automation');
+supabase secrets set AUTO_PUBLISH_SECRET=<same value>
+supabase secrets set SITE_URL=https://newssparkle.lovable.app
+supabase secrets set LOVABLE_API_KEY=<AI key>
+
+# 3. Deploy and confirm the gateway.
+npm run check:functions && supabase functions deploy
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  "https://<project-ref>.supabase.co/functions/v1/ingest-feeds" -d '{}'   # expect 401
+
+# 4. Manual dry run, one stage at a time (jobs still paused).
+curl -sS -X POST ".../functions/v1/ingest-feeds" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+  -d '{"maxSources":3}' | jq '{ok, checked: .metrics.sources_checked, rejected: .metrics.rejected}'
+curl -sS -X POST ".../functions/v1/write-desk" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+  -d '{"limit":1}' | jq '{ok, written: .itemsOut, llm: .llmCalls, errors}'
+#    Expect a post with status=review or scheduled — never published yet.
+select slug, status, scheduled_for, quality_score from public.posts order by created_at desc limit 5;
+
+# 5. Release exactly one story by hand and read it in the browser.
+curl -sS -X POST ".../functions/v1/publish-scheduler" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+  -d '{"limit":1}' | jq '{ok, published: .metrics.published, today: .metrics.published_today}'
+
+# 6. Only now, re-enable the loop.
+#    SQL: select cron.alter_job(jobid, active := true)
+#           from cron.job where jobname in ('write-desk','publish-scheduler');
+#    Leave auto-publish-* and breaking-news-monitor paused for one more day if
+#    you want a quiet first day; the newsroom still publishes on schedule.
+
+# 7. Watch for 24 hours.
+curl -sS -X POST ".../functions/v1/phase6-monitor" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+  | jq '{ok, autonomy, problems: .metrics.problems, hours_since_publish: .metrics.hours_since_publish}'
+```
+
+Stop conditions: if `phase6-monitor` returns `ok:false`, if the desk writes
+nothing for 12 hours, or if any post reads wrong — pause the loop (first
+`alter_job` block), fix forward, and re-run steps 4–5.
+
+### Health check
+
+`phase6-monitor` is the endpoint to watch; a `200` with `ok: true` means the
+newsroom is publishing unattended.
+
+```bash
+curl -sS -X POST "https://<project-ref>.supabase.co/functions/v1/phase6-monitor" \
+  -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" | jq '{ok, autonomy, problems: .metrics.problems}'
+```
+
+Useful SQL while triaging:
+
+```sql
+-- Are candidates arriving, and are they being consumed?
+select status, count(*) from public.ingested_items group by status order by 2 desc;
+
+-- What did the desk do in the last 24 hours?
+select function, count(*) filter (where ok) as ok_runs, sum(llm_calls) as llm_calls,
+       max(started_at) as last_run, max(error) filter (where not ok) as last_error
+  from public.pipeline_runs
+ where started_at > now() - interval '24 hours'
+ group by function order by function;
+
+-- Open alerts, newest first.
+select severity, code, subject, message, occurrences, updated_at
+  from public.agent_alerts where resolved_at is null order by updated_at desc;
+
+-- Did the maintenance sweep fix anything?
+select kind, ok, checked, counts, created_at
+  from public.content_health_checks order by created_at desc limit 5;
+```
+
+Trigger a slot by hand (orchestrator: ingest + write + publish):
+
+```bash
+curl -sS -X POST "https://<project-ref>.supabase.co/functions/v1/auto-publish" \
+  -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+  -H 'Content-Type: application/json' \
+  -d '{"slot":"midday","categories":["technology"]}' | jq
+```
+
+Run a single stage (useful when debugging one part of the loop):
+
+```bash
+# fetch feeds only
+curl -sS -X POST ".../functions/v1/ingest-feeds" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" | jq '.itemsIn, .itemsOut'
+# write one story from the queue
+curl -sS -X POST ".../functions/v1/write-desk" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" -d '{"limit":1}' | jq
+# release whatever is due
+curl -sS -X POST ".../functions/v1/publish-scheduler" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" | jq
+# housekeeping without network calls
+curl -sS -X POST ".../functions/v1/maintenance" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" -d '{"offline":true}' | jq
+```
+
+---
+
+## 4. Verifying security after a deploy
+
+```sql
+-- 1. anon/authenticated must hold SELECT only on editorial tables
+select table_name, grantee, string_agg(privilege_type, ', ' order by privilege_type) as privileges
+  from information_schema.table_privileges
+ where table_schema = 'public'
+   and grantee in ('anon', 'authenticated')
+ group by 1, 2
+ order by 1;
+
+-- 2. the write loophole must be gone
+select policyname, cmd from pg_policies
+ where schemaname = 'public' and tablename = 'posts';
+-- expect SELECT policies only
+
+-- 3. view counting still works (returns without error)
+select public.increment_post_views(
+  (select slug from public.posts where status = 'published' limit 1), 'test-visitor-id');
+```
+
+Then from outside the database:
+
+```bash
+# Unauthenticated call must be rejected
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST "https://<project-ref>.supabase.co/functions/v1/auto-publish" -d '{}'
+# expect 401
+
+# Public feeds must stay open
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "https://<project-ref>.supabase.co/functions/v1/sitemap"
+# expect 200
+```
+
+---
+
+## 5. Feed health
+
+`validate-feeds` checks the XML declaration, namespaces, `<loc>` absoluteness,
+tag balance and unescaped ampersands, then stores the report in
+`feed_validation_runs`:
+
+```bash
+curl -sS "https://<project-ref>.supabase.co/functions/v1/validate-feeds" \
+  -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" | jq '{ok, errors, warnings}'
+```
+
+Run it after any change to the sitemap/RSS functions or to `SITE_URL`.
+
+---
+
+## 6. Common failures
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Article URLs render blank | A render error with no boundary | Boundaries are in place; check the console and fix the component |
+| Avatars show a broken image | A `.png` under `/authors/` has no `.webp` twin | `npm run assets` |
+| Sitemap shows dead URLs | `public/sitemap.xml` was hand-edited | `npm run seo` |
+| Auto-publish returns 401 | Secret missing in Vault or function env | See §2 |
+| Auto-publish returns 500 `AI credits exhausted` | Gateway credit exhausted | Top up, or pause the cron jobs |
+| Duplicate stories | Model rewrote an existing headline | The function rejects > 80 % overlap; re-run |
+| Views not increasing | `post_view_events` already has this visitor today | Expected — one view per reader per day |

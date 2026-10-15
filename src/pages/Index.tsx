@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
@@ -19,6 +20,7 @@ const PAGE_SIZE = 15;
 export default function Index() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -26,33 +28,43 @@ export default function Index() {
 
   useEffect(() => {
     const initialize = async () => {
-      // Fetch main feed
-      const { data: mainPosts } = await supabase
-        .from("posts")
-        .select("*")
-        .eq("status", "published")
-        .order("published_at", { ascending: false })
-        .range(0, PAGE_SIZE);
-
-      const postList = (mainPosts as Post[]) || [];
-      setPosts(postList);
-      setHasMore(postList.length === PAGE_SIZE + 1);
-      setLoading(false);
-
-      // Fetch posts for each category (for category blocks)
-      const categoryData: Record<string, Post[]> = {};
-      for (const cat of CATEGORIES) {
-        const { data } = await supabase
+      try {
+        // Main feed. PAGE_SIZE + 1 rows so we can tell whether more exist:
+        // the hero row is consumed separately, hence the extra offset.
+        const { data: mainPosts, error: mainError } = await supabase
           .from("posts")
-          .select("*")
-          .eq("category_slug", cat.slug)
+          .select(POST_CARD_COLUMNS)
           .eq("status", "published")
           .order("published_at", { ascending: false })
-          .limit(4);
-        if (data) {
-          categoryData[cat.slug] = (data as Post[]) || [];
-        }
+          .range(0, PAGE_SIZE);
+
+        if (mainError) throw mainError;
+
+        const postList = normalizePosts(mainPosts);
+        setPosts(postList);
+        setHasMore(postList.length === PAGE_SIZE + 1);
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message || "Unable to load the latest stories.");
+      } finally {
+        setLoading(false);
       }
+
+      // Category blocks. These render below the fold, so they run after the
+      // main feed resolves rather than blocking it (was a sequential loop).
+      const categoryData: Record<string, Post[]> = {};
+      await Promise.all(
+        CATEGORIES.map(async (cat) => {
+          const { data } = await supabase
+            .from("posts")
+            .select(POST_CARD_COLUMNS)
+            .eq("category_slug", cat.slug)
+            .eq("status", "published")
+            .order("published_at", { ascending: false })
+            .limit(4);
+          if (data) categoryData[cat.slug] = normalizePosts(data);
+        }),
+      );
       setCategoryPosts(categoryData);
     };
 
@@ -66,11 +78,11 @@ export default function Index() {
     const to = from + PAGE_SIZE - 1;
     const { data } = await supabase
       .from("posts")
-      .select("*")
+      .select(POST_CARD_COLUMNS)
       .eq("status", "published")
       .order("published_at", { ascending: false })
       .range(from, to);
-    const next = (data as Post[]) || [];
+    const next = normalizePosts(data);
     setPosts((prev) => [...prev, ...next]);
     setHasMore(next.length === PAGE_SIZE);
     setLoadingMore(false);
@@ -222,6 +234,27 @@ export default function Index() {
           </div>
         </div>
       </section>
+
+      {/* Feed failure — say so instead of rendering an empty newsroom */}
+      {error && !loading && (
+        <section className="container-wide pt-6" role="alert">
+          <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center gap-4 justify-between">
+            <div>
+              <p className="kicker text-destructive">Feed unavailable</p>
+              <p className="mt-1 text-sm text-foreground/80">
+                We could not reach the newsroom database ({error}). Stories may be incomplete.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="inline-flex items-center justify-center rounded-full border border-border bg-background px-4 py-2 text-sm font-semibold hover:border-primary hover:text-primary transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Featured hero grid */}
       {!loading && hero && (

@@ -22,10 +22,13 @@ const LANGUAGES: { label: string; code: string; translateCode?: string }[] = [
 ];
 
 const STORAGE_KEY = "preferred_lang";
-const DEVANAGARI_REGEX = /[\u0900-\u097F]+/g;
+// NOTE: deliberately not a /g regex — a global regex is stateful across
+// .test() calls (lastIndex), which silently skipped every other text node.
+const DEVANAGARI_REGEX = /[\u0900-\u097F]/;
 const ORIGINAL_TEXT = new Map<Text, string>();
 
 interface GoogleTranslateAPI {
+  TranslateElement?: new (options: unknown, elementId: string) => void;
   translate?: {
     Service?: {
       LayoutDirection?: {
@@ -153,7 +156,9 @@ function transliterateHinglish(text: string) {
     "्": "",
   };
 
-  return text.replace(/क्ष|ज्ञ|त्र|श्र|[क-हअ-औािीुूेैोौंःँ़्]/g, (match) => {
+  // Single Devanagari code points (U+0900–U+097F). Conjuncts are matched
+  // first so "क्ष" maps to "ksh" rather than three separate letters.
+  return text.replace(/क्ष|ज्ञ|त्र|श्र|[\u0900-\u097F]/g, (match) => {
     return map[match] ?? match;
   });
 }
@@ -180,6 +185,7 @@ export function LanguageToggle() {
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY) || "en";
     setCurrent(saved);
+    document.documentElement.lang = saved === HINGLISH_CODE ? "hi-Latn" : saved;
 
     if (!document.getElementById("google_translate_element")) {
       const div = document.createElement("div");
@@ -234,6 +240,10 @@ export function LanguageToggle() {
     const selected = LANGUAGES.find((l) => l.code === code) || LANGUAGES[0];
     localStorage.setItem(STORAGE_KEY, code);
     setCurrent(code);
+
+    // Keep the document language in sync for screen readers and search engines.
+    const docLang = code === HINGLISH_CODE ? "hi-Latn" : code;
+    document.documentElement.lang = docLang;
 
     if (code !== HINGLISH_CODE && ORIGINAL_TEXT.size > 0) {
       restoreOriginalText();

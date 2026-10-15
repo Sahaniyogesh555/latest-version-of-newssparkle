@@ -120,7 +120,7 @@ export function Footer() {
                 </Link>
               </li>
               <li>
-                <a href="/security.txt" className="text-foreground/80 hover:text-primary transition-colors">
+                <a href="/.well-known/security.txt" className="text-foreground/80 hover:text-primary transition-colors">
                   Security
                 </a>
               </li>

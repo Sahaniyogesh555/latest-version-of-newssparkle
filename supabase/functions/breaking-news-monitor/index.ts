@@ -1,14 +1,21 @@
+// Breaking news monitor — looks for a genuinely new top story and asks
+// auto-publish to write it up.
+//
+// Scheduled every 30 minutes by pg_cron (see migration
+// 20261016090100_phase6_autonomy_crons.sql). Requires the automation secret,
+// because a run costs scraper + LLM calls.
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { json, preflight } from "../_shared/http.ts";
+import { requireSecret } from "../_shared/auth.ts";
+import { parseFeedXml } from "../_shared/sources.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
-
+// Note: the old Reuters RSS endpoints (feeds.reuters.com) were retired and
+// returned nothing; these are live feeds.
 const RSS_URLS = [
-  "http://feeds.reuters.com/reuters/topNews",
-  "http://feeds.bbci.co.uk/news/rss.xml",
+  "https://feeds.bbci.co.uk/news/rss.xml",
   "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+  "https://feeds.npr.org/1001/rss.xml",
 ];
 
 type FeedItem = { title: string; link?: string; snippet?: string; published?: string; source: string };
@@ -17,70 +24,86 @@ function normalizeHeadline(headline: string): string {
   return headline.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+// Deno has no DOMParser (checked on deno 2.9.6: `typeof DOMParser` is
+// "undefined"), so feed parsing goes through the shared, regex-based parser the
+// Phase 6 ingest pipeline uses. The old version threw a ReferenceError that the
+// catch below swallowed, which is why the monitor never found anything.
 async function parseFeed(xmlText: string, source: string): Promise<FeedItem[]> {
-  const doc = new DOMParser().parseFromString(xmlText, "application/xml");
-  if (!doc) return [];
-  return Array.from(doc.querySelectorAll("item")).map((item) => ({
-    title: item.querySelector("title")?.textContent?.trim() || "",
-    link: item.querySelector("link")?.textContent?.trim() || item.querySelector("guid")?.textContent?.trim(),
-    snippet: item.querySelector("description")?.textContent?.trim() || item.querySelector("summary")?.textContent?.trim(),
-    published: item.querySelector("pubDate")?.textContent?.trim() || item.querySelector("updated")?.textContent?.trim(),
+  const { items } = parseFeedXml(xmlText, { name: source });
+  return items.map((item) => ({
+    title: item.title,
+    link: item.url,
+    snippet: item.snippet,
+    published: item.published,
     source,
-  })).filter((item) => !!item.title);
+  }));
 }
 
 async function fetchBreakingFeed(url: string): Promise<FeedItem[]> {
-  const res = await fetch(url, { headers: { "User-Agent": "NewsSparkle-BreakingMonitor/1.0" } });
-  if (!res.ok) return [];
-  const xml = await res.text();
-  return parseFeed(xml, url);
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "NewsSparkle-BreakingMonitor/1.0 (+https://newssparkle.lovable.app)" },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) return [];
+    return parseFeed(await res.text(), new URL(url).hostname.replace(/^www\./, ""));
+  } catch {
+    return [];
+  }
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight();
+
+  const denied = requireSecret(req, { envVars: ["AUTO_PUBLISH_SECRET", "CRON_SECRET"] });
+  if (denied) return denied;
 
   try {
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const supabase = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
-    const allItems = await Promise.all(RSS_URLS.map((url) => fetchBreakingFeed(url).catch(() => [])));
-    const items = allItems.flat().sort((a, b) => {
+    const allItems = (await Promise.all(RSS_URLS.map(fetchBreakingFeed))).flat();
+    const items = allItems.sort((a, b) => {
       if (!a.published || !b.published) return 0;
       return new Date(b.published).getTime() - new Date(a.published).getTime();
     });
 
-    const recent = await supabase.from("posts").select("title").eq("status", "published").gte("published_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-    const existingTitles = new Set((recent.data || []).map((row: any) => normalizeHeadline(row.title)));
+    const recent = await supabase
+      .from("posts")
+      .select("title")
+      .eq("status", "published")
+      .gte("published_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .limit(200);
+    const existingTitles = new Set(
+      ((recent.data ?? []) as Array<{ title: string }>).map((row) => normalizeHeadline(row.title)),
+    );
 
     const candidate = items.find((item) => !existingTitles.has(normalizeHeadline(item.title)));
     if (!candidate) {
-      return new Response(JSON.stringify({ ok: true, message: "No new breaking item found." }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      return json({ ok: true, message: "No new breaking item found.", scanned: items.length });
     }
 
-    const publishUrl = Deno.env.get("AUTO_PUBLISH_URL") || `${Deno.env.get("SITE_URL") || ""}/functions/v1/auto-publish`;
-    if (!publishUrl || publishUrl.endsWith("/functions/v1/auto-publish") && !Deno.env.get("SITE_URL")) {
-      return new Response(JSON.stringify({ ok: false, error: "AUTO_PUBLISH_URL or SITE_URL is not configured." }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
+    const publishUrl = Deno.env.get("AUTO_PUBLISH_URL") ||
+      `${supabaseUrl}/functions/v1/auto-publish`;
+    const secret = Deno.env.get("AUTO_PUBLISH_SECRET") || Deno.env.get("CRON_SECRET") ||
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 
     const response = await fetch(publishUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${secret}`,
+      },
       body: JSON.stringify({ category: "breaking-news", slot: "morning", topic: candidate.title }),
+      signal: AbortSignal.timeout(150_000),
     });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Auto-publish failed: ${response.status} ${text}`);
-    }
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Auto-publish failed: ${response.status} ${text}`);
 
-    const body = await response.json();
-    return new Response(JSON.stringify({ ok: true, triggered: true, candidate: candidate.title, publish: body }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return json({ ok: true, triggered: true, candidate: candidate.title, source: candidate.source, publish: JSON.parse(text) });
   } catch (e) {
     console.error("breaking-news-monitor fatal:", e);
-    return new Response(JSON.stringify({ ok: false, error: (e as Error).message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return json({ ok: false, error: (e as Error).message }, 500);
   }
 });

@@ -2,18 +2,20 @@
 // Triggered by cron (every ~10 minutes). Idempotent: unique(slug,kind,alert_day).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+import { json, preflight } from "../_shared/http.ts";
+import { requireSecret } from "../_shared/auth.ts";
 
 const BREAKING_WINDOW_MIN = 30; // posts published within last 30 min
 const TRENDING_WINDOW_HOURS = 6;
 const TRENDING_MIN_VIEWS = 200; // threshold for trending alert
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight();
+
+  // Unauthenticated calls previously let anyone push fake "Breaking" alerts to
+  // every reader subscribed to browser notifications.
+  const denied = requireSecret(req, { envVars: ["AUTO_PUBLISH_SECRET", "CRON_SECRET"] });
+  if (denied) return denied;
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -89,13 +91,8 @@ Deno.serve(async (req) => {
       else if (!error.message.includes("duplicate")) results.errors.push(error.message);
     }
 
-    return new Response(JSON.stringify({ ok: true, ...results }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return json({ ok: true, ...results });
   } catch (err) {
-    return new Response(
-      JSON.stringify({ ok: false, error: String((err as Error).message ?? err), ...results }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return json({ ok: false, error: String((err as Error).message ?? err), ...results }, 500);
   }
 });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePost } from "@/lib/posts";
 import { Post } from "@/lib/types";
 import { OptimizedImage } from "@/components/OptimizedImage";
 import { formatDate } from "@/lib/site";
@@ -10,18 +11,18 @@ export function ContinueReading() {
   const [continueReading, setContinueReading] = useState<Post | null>(null);
 
   useEffect(() => {
-    // Get the last viewed post from localStorage or a similar mechanism
-    const lastViewed = localStorage.getItem('lastViewedPost');
+    // Last article opened in this browser (written by PostPage).
+    const lastViewed = localStorage.getItem("lastViewedPost");
     if (lastViewed) {
       const fetchPost = async () => {
         const { data } = await supabase
           .from("posts")
-          .select("*")
+          .select(POST_CARD_COLUMNS)
           .eq("slug", lastViewed)
           .eq("status", "published")
           .single();
 
-        if (data) setContinueReading(data as Post);
+        if (data) setContinueReading(normalizePost(data));
       };
       fetchPost();
     }

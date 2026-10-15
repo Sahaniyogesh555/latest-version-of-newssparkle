@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, Navigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
@@ -16,10 +17,10 @@ export default function TagPage() {
     if (!tag) return;
     const decoded = decodeURIComponent(tag);
     setLoading(true);
-    supabase.from("posts").select("*").eq("status", "published")
+    supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published")
       .contains("keywords", [decoded])
       .order("published_at", { ascending: false }).limit(60)
-      .then(({ data }) => { setPosts((data as Post[]) || []); setLoading(false); });
+      .then(({ data }) => { setPosts(normalizePosts(data)); setLoading(false); });
   }, [tag]);
 
   if (!tag) return <Navigate to="/" replace />;

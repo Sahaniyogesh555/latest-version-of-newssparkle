@@ -27,7 +27,7 @@ export function PushNotificationsPrompt() {
         setGranted(true);
         new Notification("Breaking news alerts on", {
           body: "We'll only ping you for major breaking stories.",
-          icon: "/logo.svg",
+          icon: "/icon-192.png",
         });
       }
     } catch { /* ignore */ }

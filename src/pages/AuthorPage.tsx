@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
@@ -20,13 +21,13 @@ export default function AuthorPage() {
     setLoading(true);
     supabase
       .from("posts")
-      .select("*")
+      .select(POST_CARD_COLUMNS)
       .eq("author", author.name)
       .eq("status", "published")
       .order("published_at", { ascending: false })
       .limit(30)
       .then(({ data }) => {
-        setPosts((data as Post[]) || []);
+        setPosts(normalizePosts(data));
         setLoading(false);
       });
   }, [author]);

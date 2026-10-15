@@ -1,0 +1,289 @@
+PHASE 6.1 - LIVE DEPLOYMENT / INTEGRATION VERIFICATION
+=======================================================
+Date: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
+Base commit: 65a65bd (Phase 6) + the changes in section 10.
+Scope: verify what can be verified with real engines, fix what breaks, and
+write down exactly what still needs the live Supabase project.
+
+METHOD (and what "verified" means here)
+---------------------------------------
+This environment has no Supabase credentials, no database and no network egress
+(every *.supabase.co call fails to connect; no SUPABASE_* variable is set), so
+nothing below claims a dashboard result. Instead the two things that decide
+whether Phase 6 works were executed with real engines:
+
+ 1. THE MIGRATIONS, replayed in filename order against real PostgreSQL 18.6
+    (the PostgreSQL source compiled to WASM by PGlite 0.5.10). The
+    platform-only building blocks (pg_cron, pg_net, Vault, auth, the
+    anon/authenticated/service_role roles, the realtime publication) come from
+    a stub prelude that mirrors their documented behaviour.
+    src/test/phase6-sql.test.ts (14 tests) + src/test/harness/sql-staging.ts.
+ 2. THE FUNCTIONS, type-checked by the real Deno runtime (deno 2.9.6 /
+    V8 15.0.245.2 / TypeScript 6.0.3) - the runtime Supabase uses.
+    `npm run check:functions` (scripts/check-functions.mjs, 13 entrypoints).
+
+1. PASS - VERIFIED HERE
+-----------------------
+PASS  Migration chain applies cleanly: 12 files / 1087 lines, no errors.
+      Only 3 statements were substituted - the `create extension if not exists`
+      lines for pg_cron + pg_net (20260503120214_...) and pgcrypto
+      (20261016090000_phase6_autonomy_schema.sql). Everything else ran as
+      written, including the older
+      `alter publication supabase_realtime add table public.notifications`.
+PASS  Phase 6 migrations are re-runnable: re-applying both keeps 24 sources,
+      14 jobs, no duplicate rows, no errors.
+PASS  Schema: 6 automation tables, all 17 new posts columns, all 13 indexes;
+      posts status accepts draft/review/scheduled/published/rejected/archived
+      and rejects anything else; ingested fingerprints are unique; record_alert
+      upserts one row per code/day and increments occurrences.
+PASS  RLS: enabled on every automation table, and anon/authenticated hold no
+      SELECT or INSERT on any of them. The public posts policy still requires
+      status='published' and anon cannot INSERT.
+PASS  RPCs: all 7 service-role functions are SECURITY DEFINER with a pinned
+      search_path and are not executable by anon/authenticated.
+      claim_ingested_items() serves the highest trust tier first, skips expired
+      rows and rows inside retry backoff, and never hands the same row out
+      twice (two overlapping calls claimed 2 rows, then only the untouched
+      candidate). prune_automation_tables() deletes only past-retention rows.
+      newsroom_status / newsroom_llm_calls_today / category_published_count
+      return the documented shapes and numbers.
+PASS  Cron: exactly the 14 intended jobs, once each, active, with the exact
+      command and timeout from the migration (string-equal after whitespace
+      normalisation) - including the 3 editions, the 4 Phase 5 jobs routed
+      through their helpers, and both prunes. The retired Phase 5 job names do
+      not reappear.
+PASS  Vault -> trigger -> function: posts to
+      <newsroom_base_url>/functions/v1/<function> with
+      `Authorization: Bearer <auto_publish_secret>`, the JSON body, and the
+      row's timeout (120/300/90/240/180/60s). The secret comes from
+      vault.decrypted_secrets, never from a URL, and is in no repository file.
+      A missing secret still sends the request (empty bearer + warning) instead
+      of breaking the job; a custom newsroom_base_url is honoured.
+PASS  Deno: 13/13 entrypoints pass `deno check` (strict). This FAILED before
+      the fix in section 4.
+PASS  Alignment: every function directory is declared in supabase/config.toml;
+      the 10 write-capable endpoints call requireSecret(); the 3 public feeds
+      (sitemap, news-sitemap, rss) do not; every relative import resolves; no
+      function references a browser-only global (all undefined in Deno);
+      cron -> function -> config.toml is asserted end to end.
+PASS  Secrets wiring: every env var the functions read is documented in
+      .env.example (3 gaps found and fixed), the Vault names the SQL reads are
+      the names the operator is told to create, auth.ts accepts exactly what
+      the trigger sends, and no live credential is committed (JWT/sk- scan;
+      the one legacy migration with an embedded anon JWT is whitelisted and
+      must be rotated - OPERATIONS.md section 2).
+PASS  Limits are the documented ones: 18 posts/UTC day, 5 per section, 25-min
+      minimum gap, 2 per run, 180-min catch-up, 12-h lookahead, editions
+      5+6+7=18, publish >=75 / review >=55, duplicate thresholds
+      0.72/0.55/0.38/0.2, LLM budget 220 calls/day checked before the desk
+      spends.
+PASS  Pipeline behaviour offline (fake DB/AI/HTTP): 192 tests / 12 files pass.
+      All six orchestrators are covered end to end - ingest (validation,
+      dedupe, corroboration, source health, cooldown, garbage feeds), write
+      desk (write -> verify -> score -> schedule/review/reject, unparseable
+      output, duplicate skip, budget stop, no-key stop, 3-attempt give-up),
+      scheduler (burst, gap, daily cap, overdue rebalance, failure alert),
+      trends (scoring, gap notes, covered-topic suppression, outage), 
+      maintenance (image repair, stale archive, broken links, endpoints) and
+      the monitor (stale-publishing escalation, quiet when healthy).
+
+2. BLOCKED - NEEDS THE LIVE PROJECT
+-----------------------------------
+Each item names the command and the expected result, so it is a checklist.
+
+BLOCKED  Apply migrations: `supabase link --project-ref ruusbjlabbojpbawbphc`
+         + `supabase db push` -> 12 migrations, 0 errors. Then
+         `select jobname, schedule, active from cron.job order by 1;`
+         -> 14 rows, all active (the loop starts immediately - pause first,
+         see OPERATIONS.md "First activation").
+BLOCKED  Deploy functions:
+         `supabase functions deploy ingest-feeds write-desk publish-scheduler
+          trend-watch maintenance phase6-monitor auto-publish`
+         (plus breaking-news-monitor, notifications-dispatcher,
+          validate-feeds, sitemap, news-sitemap, rss) -> 13 deployments.
+BLOCKED  Create secrets: vault.create_secret('<32-byte hex>',
+         'auto_publish_secret', ...) + vault.create_secret(<project url>,
+         'newsroom_base_url', ...) + `supabase secrets set
+         AUTO_PUBLISH_SECRET=<same value>`. Expect no "missing from Vault"
+         warning and no 401 in net._http_response.
+BLOCKED  Controlled live end-to-end (publishing jobs paused):
+           1. POST ingest-feeds {"maxSources":3} -> ok:true, candidates added,
+              a pipeline_runs row written
+           2. select count(*) from ingested_items where status='new';
+           3. POST write-desk {"limit":1} -> a post with status scheduled or
+              review - never published
+           4. POST publish-scheduler {"limit":1} -> exactly one post published,
+              live on the site, in the sitemap/RSS within the hour
+           5. POST phase6-monitor -> 200, ok:true, no problems listed
+         This is the only test that exercises pg_net, real Vault, the real
+         feeds, the real model and PostgREST together.
+BLOCKED  Live feed reachability: publishers block cloud IP ranges and Google
+         rate-limits by IP; only a live ingest run proves the 24 seeded feeds
+         answer from Supabase's network.
+BLOCKED  Real model quality: the tests prove the gates catch bad output, not
+         that the configured model writes well.
+
+3. NOT TESTED (and why)
+-----------------------
+NOT TESTED  A full publishing day (needs 24h of live cron). Caps and spacing
+            are unit-tested; the calendar is not.
+NOT TESTED  Google indexing of the refreshed sitemaps (needs crawl data).
+NOT TESTED  Storage growth over months - retention rules are asserted in SQL
+            (36h candidates + 7d grace, 30d runs/health, 60d alerts, 90d view
+            events), not observed over time.
+NOT TESTED  pg_cron actually ticking at :05/:35 etc. (platform extension; the
+            prelude reproduces its upsert/unschedule semantics, not its clock).
+
+4. BUGS FOUND AND FIXED IN 6.1
+------------------------------
+FIXED  breaking-news-monitor was dead in production, silently (highest impact
+       find). It parsed feeds with `new DOMParser()`, but Deno does not define
+       DOMParser (`typeof DOMParser` = "undefined" on deno 2.9.6, verified on
+       the real runtime). Every run threw a ReferenceError that the surrounding
+       try/catch swallowed, so the monitor reported "No new breaking item
+       found" forever while thinking all three feeds were empty. Repointed to
+       the shared regex-based parseFeedXml() that ingest-feeds uses and that is
+       already tested for RSS, Atom and garbage input. New guard:
+       repo-integrity fails if any edge function references a browser-only
+       global. This survived CI because CI never ran Deno.
+FIXED  Undocumented secrets the code reads: CRON_SECRET, AUTO_PUBLISH_URL
+       (both used by breaking-news-monitor) - now in .env.example, together
+       with the second Vault name newsroom_base_url (was in neither doc).
+FIXED  .env.example advertised GNEWS/NEWSAPI/SERPAPI keys as optional sources
+       although Phase 6 reads sources from content_sources; relabelled legacy
+       so an operator does not configure and pay for dead keys.
+FIXED  Removed SIMHASH_PREFILTER_BITS, a constant that implied a database
+       prefilter nobody implemented (the archive comparison runs the exact
+       4-shingle Jaccard over the last 7 days / 80 posts).
+FIXED  docs/OPERATIONS.md said "deploys all seven" (there are 13) and its pause
+       recipe covered only the 5 Phase 5 jobs.
+NEW    Safe first-activation procedure (pause/publish/resume, ordered smoke
+       test, stop conditions) in OPERATIONS.md.
+
+5. COST AND RESOURCE ESTIMATE (after activation)
+------------------------------------------------
+Invocations ~542/day (ingest 72, publish-scheduler 144, write-desk 48,
+breaking-news 48, notifications 144, monitor 48, maintenance 24, trends 8,
+editions 3, validate 1, prunes 2) = ~16k/month.
+Feeds: 72 runs x 24 sources = 1728 GETs/day at 40-80 KB, nothing stored beyond
+       candidates that pass validation.
+LLM: 2-4 calls per published story; the cap is 18 stories/day, so ~36-72
+     calls/day typical against a hard 220/day budget the desk checks first.
+     At gpt-4o-mini rates that is roughly $0.30-0.60/day worst case.
+Images: <=36 provider calls/day (Unsplash/Pexels free tiers allow 50/hour);
+        picsum fallback is free.
+Database: ~150-400 new candidates/day, ~542 run rows/day, ~24 health checks/day
+          - steady state tens of MB, inside current Supabase tiers.
+Headroom: publishing is capped at 18/day while the queue fills with hundreds of
+          candidates, so the system idles cheaply instead of overspending.
+
+6. SAFE ACTIVATION (order matters)
+----------------------------------
+The migration creates the cron jobs ACTIVE, so `supabase db push` starts the
+loop. Instead:
+ 1. db push, then immediately pause the writing/publishing jobs:
+      select cron.alter_job(jobid, active := false) from cron.job
+       where jobname in ('write-desk','publish-scheduler',
+             'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+             'breaking-news-monitor','notifications-dispatcher');
+    (ingest + phase6-monitor stay on so candidates and alerts are visible)
+ 2. Set the secrets (Vault + function env, identical value).
+ 3. Deploy functions; confirm an unauthenticated POST returns 401.
+ 4. Manual dry run, one stage at a time (section 2) - do not enable publishing
+    before this passes.
+ 5. Re-enable write-desk + publish-scheduler, watch 24h, then re-enable the
+    editions and breaking-news-monitor.
+Stop conditions: monitor ok:false, nothing written in 12h, or any post that
+reads wrong -> pause with the block above, fix, repeat steps 4-5.
+
+7. EMERGENCY STOP
+-----------------
+  select cron.alter_job(jobid, active := false) from cron.job where jobname in
+    ('write-desk','publish-scheduler','auto-publish-morning','auto-publish-midday',
+     'auto-publish-evening','breaking-news-monitor');   -- stop publishing
+  update cron.job set active = false;                    -- stop everything
+  update public.content_sources set active = false;      -- stop one/all feeds
+Nothing is deleted: scheduled posts stay scheduled and resume when the jobs are
+re-enabled.
+
+8. FINAL STATUS PER DELIVERABLE
+-------------------------------
+ 1 automation audit / readiness ............. PASS
+ 2 content ingestion ........................ PASS offline / BLOCKED live feeds
+ 3 AI rewrite pipeline ...................... PASS offline / BLOCKED live model
+ 4 category assignment ...................... PASS
+ 5 SEO generation ........................... PASS
+ 6 featured-image automation ................ PASS / BLOCKED provider calls
+ 7 quality scoring .......................... PASS
+ 8 duplicate detection ...................... PASS
+ 9 scheduling engine ........................ PASS (24h cadence NOT TESTED)
+10 failure recovery ......................... PASS
+11 trend detection .......................... PASS offline / BLOCKED live API
+12 autonomous maintenance ................... PASS
+13 safety & trust gates ..................... PASS
+14 resource efficiency ...................... PASS (estimates; real spend NOT
+                                              TESTED until live)
+15 final verification of every subsystem .... PASS for 13/13 functions and
+                                              12/12 migrations; 6 live items
+                                              BLOCKED
+16 phase6_summary.txt ....................... PASS (already delivered)
+   deploy the 7 functions ................... BLOCKED (no CLI credentials/egress)
+   cron execution on the platform ........... BLOCKED (pg_cron ticks live only)
+   secrets present in Vault ................. BLOCKED (cannot read the project)
+
+Nothing was activated: recurring production publishing stays OFF until the
+section 2 items pass.
+
+9. AUTONOMY AFTER ACTIVATION
+----------------------------
+Unchanged from the Phase 6 estimate: ~90-95% of the publishing cycle runs
+without a human. Automated: sourcing, validation, rewriting, verification,
+scoring, dedupe, SEO, images, scheduling, publishing, monitoring, recovery,
+maintenance, retention. Human: the review lane (1-3 drafts/day expected), key
+rotation, and acting on alerts.
+
+10. FILES CHANGED IN 6.1
+------------------------
+src/test/harness/sql-staging.ts     new - PGlite staging harness
+src/test/phase6-sql.test.ts         new - 14 migration/schema/RPC/cron tests
+src/test/phase6-secrets.test.ts     new - 10 secret/cost/hygiene tests
+scripts/check-functions.mjs         new - `deno check` for every entrypoint
+src/test/repo-integrity.test.ts     +2 tests (browser globals, import graph)
+src/test/setup.ts                   jsdom shims guarded for node-env tests
+supabase/functions/breaking-news-monitor/index.ts   DOMParser -> parseFeedXml
+supabase/functions/_shared/dedupe.ts                remove unused constant
+package.json                        pglite devDependency + check:functions
+.env.example, README.md, docs/OPERATIONS.md   secrets, activation, tooling
+
+11. REMAINING RISKS
+-------------------
+- The first live ingest run is the first time the 24 seeded feeds are fetched
+  from Supabase's network; expect a few to need replacing.
+- Model quality is the largest uncontrollable variable; the review lane (55-74)
+  is the mitigation and needs a human to stay one.
+- The legacy anon JWT in the first migration is still in git history: rotate it
+  (OPERATIONS.md section 2).
+- auto_publish_secret must match between Vault and the function environment; a
+  mismatch fails closed (401) but publishes nothing.
+
+12. REPOSITORY STATE
+--------------------
+Everything above is committed and pushed to
+arena/e59698ee-latest-version-of-newssparkle.
+
+One file is deliberately NOT in the commit: .github/workflows/ci.yml. The GitHub
+App installation used to push this repository does not hold the `workflows`
+permission, and GitHub rejects any push whose commits create, edit or delete a
+file under .github/workflows ("refusing to allow a GitHub App to create or
+update workflow ... without `workflows` permission"). Pushing the workflow file
+and pushing the code cannot happen in the same commit - GitHub rejects the
+whole ref update.
+
+Resolution: the workflow definition is preserved in the repository as
+docs/ci-workflow.pending.yml, with instructions in its header and in README.md.
+It needs one commit by a token that holds the `workflows` scope (the GitHub web
+UI or a reconnect with that permission works). Until then `npm run verify` is
+the same gate, run locally, and it passes.
+
+The pre-existing .github/workflows/npm-publish-github-packages.yml is left
+untouched for the same reason.

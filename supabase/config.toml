@@ -1,16 +1,69 @@
 project_id = "ruusbjlabbojpbawbphc"
 
+# ---------------------------------------------------------------------------
+# Edge function auth.
+#
+# verify_jwt = false means the Supabase gateway does NOT require a Supabase JWT.
+# Every write-capable function below authenticates the caller itself against a
+# shared secret (see supabase/functions/_shared/auth.ts), which is required
+# because pg_cron calls them with `Authorization: Bearer <AUTO_PUBLISH_SECRET>`
+# rather than a Supabase-issued JWT.
+#
+#   auto-publish              – spends LLM credits and inserts posts
+#   breaking-news-monitor     – triggers auto-publish
+#   notifications-dispatcher  – pushes reader-facing alerts
+#   validate-feeds            – reads feeds, writes a report row
+#
+# The feed endpoints are intentionally public: search engines and RSS readers
+# must be able to fetch them anonymously.
+# ---------------------------------------------------------------------------
+
+[functions.auto-publish]
+verify_jwt = false
+
+[functions.breaking-news-monitor]
+verify_jwt = false
+
+[functions.notifications-dispatcher]
+verify_jwt = false
+
+[functions.validate-feeds]
+verify_jwt = false
+
+# Phase 6 — autonomous newsroom. Same rule: the gateway does not verify a JWT;
+# each function authenticates the caller against the automation secret itself.
+#
+#   ingest-feeds       – reads feeds, writes candidates
+#   write-desk         – spends LLM credits, writes drafts (never publishes)
+#   publish-scheduler  – flips scheduled posts to published
+#   trend-watch        – reads trend feeds, reprioritises the queue
+#   maintenance        – repairs images/links, checks the public endpoints
+#   phase6-monitor     – health snapshot + alerts (safe to poll)
+# ---------------------------------------------------------------------------
+
+[functions.ingest-feeds]
+verify_jwt = false
+
+[functions.write-desk]
+verify_jwt = false
+
+[functions.publish-scheduler]
+verify_jwt = false
+
+[functions.trend-watch]
+verify_jwt = false
+
+[functions.maintenance]
+verify_jwt = false
+
+[functions.phase6-monitor]
+verify_jwt = false
+
 [functions.sitemap]
 verify_jwt = false
 
 [functions.news-sitemap]
 verify_jwt = false
 
-[functions.notifications-dispatcher]
-verify_jwt = false
-
 [functions.rss]
-verify_jwt = false
-
-[functions.validate-feeds]
 verify_jwt = false

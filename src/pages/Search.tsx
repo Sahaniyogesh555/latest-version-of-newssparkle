@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
@@ -76,7 +77,7 @@ export default function Search() {
     }
     setLoading(true);
 
-    let query = supabase.from("posts").select("*").eq("status", "published");
+    let query = supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published");
 
     if (q) {
       const term = q.replace(/[%_]/g, "\\$&");
@@ -104,7 +105,7 @@ export default function Search() {
     else query = query.order("views", { ascending: false });
 
     query.limit(60).then(({ data }) => {
-      setResults((data as Post[]) || []);
+      setResults(normalizePosts(data));
       setLoading(false);
     });
   }, [q, category, range, fromDate, toDate, sort, author, tagsParam, selectedTags]);
