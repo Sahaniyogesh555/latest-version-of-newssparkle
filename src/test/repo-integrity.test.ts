@@ -10,6 +10,16 @@
  * They read files from disk, so they run against the real repository, not a mock.
  */
 import { describe, it, expect } from "vitest";
+import {
+  ALL_JOBS,
+  GATE_EXPECTATION,
+  GATED_JOB_NAMES,
+  GATE_SQL,
+  SAFE_JOB_NAMES,
+  extractActiveStatements,
+  jobNamesInStatement,
+  normaliseSql,
+} from "./harness/cron-contract";
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -203,6 +213,80 @@ describe("edge functions", () => {
     const migrations = readdirSync(join(root, "supabase/migrations")).map((f) => read(`supabase/migrations/${f}`)).join("\n");
     expect(migrations).toMatch(/REVOKE ALL ON public\.posts FROM anon/);
     expect(migrations).toMatch(/DROP POLICY IF EXISTS "Anyone can increment views"/);
+  });
+});
+
+describe("the Phase 6 cron gate is one statement in four places", () => {
+  const MIGRATION = "supabase/migrations/20261016090100_phase6_autonomy_crons.sql";
+  const REPAIR = "supabase/migrations/20261016090200_phase6_activation_gate.sql";
+  const CHECKLIST = "phase6_activation_checklist.txt";
+  const OPERATIONS = "docs/OPERATIONS.md";
+  const gate = normaliseSql(GATE_SQL);
+
+  it("embeds the identical gate statement in the migration, the repair migration, the checklist and OPERATIONS.md", () => {
+    const missing = [MIGRATION, REPAIR, CHECKLIST, OPERATIONS].filter(
+      (file) => !normaliseSql(read(file)).includes(gate),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it("keeps every `active = false` statement in the docs limited to the gated job set", () => {
+    const offenders: string[] = [];
+    for (const file of [CHECKLIST, OPERATIONS]) {
+      const text = read(file);
+      for (const statement of extractActiveStatements(text, "false")) {
+        const names = jobNamesInStatement(statement);
+        // A bare `update cron.job set active = false;` names no job: it may
+        // pause the safe jobs too, and the docs say so explicitly.
+        if (names.length === 0) continue;
+        const unexpected = names.filter((name) => !GATED_JOB_NAMES.includes(name));
+        const missingGated = GATED_JOB_NAMES.filter((name) => !names.includes(name));
+        if (unexpected.length || missingGated.length) {
+          offenders.push(`${file}: ${statement}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("states the same 8-of-14 / 6 expectation in both operator documents", () => {
+    expect(GATE_EXPECTATION).toBe(
+      `${GATED_JOB_NAMES.length} of ${ALL_JOBS.length} jobs inactive (gated)` +
+        ` / ${SAFE_JOB_NAMES.length} active (safe)`,
+    );
+    for (const file of [CHECKLIST, OPERATIONS]) {
+      expect(read(file), file).toContain(GATE_EXPECTATION);
+    }
+  });
+
+  it("creates every gated job inactive and every safe job active in the migration", () => {
+    const migration = read(MIGRATION);
+    const gated = [...migration.matchAll(
+      /schedule_in_database\(\s*'([a-z0-9-]+)'[\s\S]*?active\s*:=\s*false\s*\)/g,
+    )].map((match) => match[1]);
+    expect(gated.sort()).toEqual([...GATED_JOB_NAMES].sort());
+
+    const safe = SAFE_JOB_NAMES.filter((name) =>
+      new RegExp(`cron\\.schedule\\(\\s*'${name}'`).test(migration),
+    );
+    expect(safe.sort()).toEqual([...SAFE_JOB_NAMES].sort());
+
+    // Nothing in the migration may switch a job *on* at apply time.
+    expect(normaliseSql(migration)).not.toMatch(/set active = true/);
+  });
+
+  it("keeps the retired 'everything starts active' wording out of the docs", () => {
+    const retired = [
+      "creates every job **active**",
+      "creates all 14 cron jobs ACTIVE",
+      "those 6 rows false",
+      "those 7 rows false",
+      "disables seven named jobs",
+    ];
+    for (const file of [CHECKLIST, OPERATIONS]) {
+      const text = read(file);
+      for (const phrase of retired) expect(text, file).not.toContain(phrase);
+    }
   });
 });
 

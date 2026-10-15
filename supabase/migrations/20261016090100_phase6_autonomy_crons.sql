@@ -11,6 +11,31 @@
 --   maintenance         hourly         health checks (deep pass at 02:xx)
 --   validate-feeds      daily          feed format validation
 --   auto-publish        3x daily       edition orchestrator (ingest→write→schedule)
+--
+-- FAIL CLOSED (audited Phase 6.1)
+--
+-- Eight of the jobs below can publish an article, spend LLM budget to queue
+-- one, alert readers about one, or archive published content. They are created
+-- INACTIVE so a fresh install has no window — not even a sub-second one — in
+-- which such a job could run before the operator finishes the preflight in
+-- phase6_activation_checklist.txt.
+--
+-- cron.schedule() always inserts a job active, so the gated jobs go through
+-- cron.schedule_in_database(..., active := false): the row is born inactive
+-- (pg_cron's ScheduleCronJob inserts the `active` argument exactly as given),
+-- which makes the guarantee independent of statement or transaction
+-- boundaries. See src/test/harness/cron-contract.ts for the canonical sets.
+--
+-- Gated (inactive):  write-desk, publish-scheduler, auto-publish-{morning,
+--                    midday,evening}, breaking-news-monitor,
+--                    notifications-dispatcher, newsroom-maintenance
+-- Safe  (active):    ingest-feeds, trend-watch, phase6-monitor,
+--                    validate-feeds-daily, prune-post-view-events,
+--                    prune-automation
+--
+-- The canonical gate statement is repeated at the end of this file and in
+-- 20261016090200_phase6_activation_gate.sql; src/test/phase6-sql.test.ts and
+-- src/test/repo-integrity.test.ts assert that every copy is identical.
 -- ============================================================================
 
 -- ---------------------------------------------------------------------------
@@ -112,43 +137,60 @@ end $$;
 
 -- ---------------------------------------------------------------------------
 -- 3. The autonomous loop
+--
+-- Safe jobs use cron.schedule(); the gate set is created inactive with
+-- cron.schedule_in_database(). Schedules and commands are unchanged.
 -- ---------------------------------------------------------------------------
 select cron.schedule('ingest-feeds', '*/20 * * * *',
   $$ select public.newsroom_trigger('ingest-feeds', '{}'::jsonb, 120000); $$);
 
-select cron.schedule('write-desk', '*/30 * * * *',
-  $$ select public.newsroom_trigger('write-desk', '{}'::jsonb, 300000); $$);
+select cron.schedule_in_database('write-desk', '*/30 * * * *',
+  $$ select public.newsroom_trigger('write-desk', '{}'::jsonb, 300000); $$, current_database(), active := false);
 
-select cron.schedule('publish-scheduler', '*/10 * * * *',
-  $$ select public.newsroom_trigger('publish-scheduler', '{}'::jsonb, 90000); $$);
+select cron.schedule_in_database('publish-scheduler', '*/10 * * * *',
+  $$ select public.newsroom_trigger('publish-scheduler', '{}'::jsonb, 90000); $$, current_database(), active := false);
 
 select cron.schedule('trend-watch', '15 */3 * * *',
   $$ select public.newsroom_trigger('trend-watch', '{}'::jsonb, 120000); $$);
 
-select cron.schedule('newsroom-maintenance', '40 * * * *',
-  $$ select public.newsroom_trigger('maintenance', '{}'::jsonb, 240000); $$);
+select cron.schedule_in_database('newsroom-maintenance', '40 * * * *',
+  $$ select public.newsroom_trigger('maintenance', '{}'::jsonb, 240000); $$, current_database(), active := false);
 
 select cron.schedule('validate-feeds-daily', '30 4 * * *',
   $$ select public.newsroom_trigger('validate-feeds', '{}'::jsonb, 180000); $$);
 
 -- Editions: the orchestrator ingests, writes to quota and spreads publishing
--- across the following hours.
-select cron.schedule('auto-publish-morning', '0 6 * * *',
-  $$ select public.trigger_auto_publish('morning'); $$);
-select cron.schedule('auto-publish-midday', '0 12 * * *',
-  $$ select public.trigger_auto_publish('midday'); $$);
-select cron.schedule('auto-publish-evening', '0 18 * * *',
-  $$ select public.trigger_auto_publish('evening'); $$);
+-- across the following hours. Publishing-capable, so created inactive.
+select cron.schedule_in_database('auto-publish-morning', '0 6 * * *',
+  $$ select public.trigger_auto_publish('morning'); $$, current_database(), active := false);
+select cron.schedule_in_database('auto-publish-midday', '0 12 * * *',
+  $$ select public.trigger_auto_publish('midday'); $$, current_database(), active := false);
+select cron.schedule_in_database('auto-publish-evening', '0 18 * * *',
+  $$ select public.trigger_auto_publish('evening'); $$, current_database(), active := false);
 
 -- Reader-facing alert pipelines (unchanged cadence, now secret-authenticated).
-select cron.schedule('breaking-news-monitor', '*/30 * * * *',
-  $$ select public.trigger_breaking_news_monitor(); $$);
-select cron.schedule('notifications-dispatcher', '*/10 * * * *',
-  $$ select public.trigger_notifications_dispatcher(); $$);
+-- Gated: a test article must not be able to ping readers.
+select cron.schedule_in_database('breaking-news-monitor', '*/30 * * * *',
+  $$ select public.trigger_breaking_news_monitor(); $$, current_database(), active := false);
+select cron.schedule_in_database('notifications-dispatcher', '*/10 * * * *',
+  $$ select public.trigger_notifications_dispatcher(); $$, current_database(), active := false);
 
 -- Newsroom health: an alarm that works even when nothing else does.
 select cron.schedule('phase6-monitor', '5,35 * * * *',
   $$ select public.newsroom_trigger('phase6-monitor', '{}'::jsonb, 60000); $$);
+
+-- ---------------------------------------------------------------------------
+-- 3b. The gate — the canonical statement, repeated identically in
+--     20261016090200_phase6_activation_gate.sql, phase6_activation_checklist.txt
+--     and docs/OPERATIONS.md. It is a no-op on a fresh install (the rows above
+--     are already inactive); it repairs a project whose jobs were created
+--     active by an earlier revision of this file.
+-- ---------------------------------------------------------------------------
+update cron.job set active = false
+ where jobname in ('write-desk','publish-scheduler',
+                   'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                   'breaking-news-monitor','notifications-dispatcher',
+                   'newsroom-maintenance');
 
 -- Housekeeping
 select cron.schedule('prune-post-view-events', '15 3 * * *',
@@ -159,6 +201,8 @@ select cron.schedule('prune-automation', '25 3 * * *',
 -- ---------------------------------------------------------------------------
 -- 4. Verification
 --     select jobname, schedule, active from cron.job order by jobname;
+--       -> 14 rows: 8 inactive (the gate set) / 6 active (ingest-feeds,
+--          trend-watch, phase6-monitor, validate-feeds-daily, both prunes)
 --     select status, status_code, left(content, 160), created
 --       from net._http_response order by created desc limit 20;
 -- ---------------------------------------------------------------------------

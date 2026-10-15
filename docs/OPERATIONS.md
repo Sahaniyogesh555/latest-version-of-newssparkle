@@ -133,24 +133,39 @@ Phase 6 replaces the old schedule with a closed loop: ingest → write → publi
 plus trend watching, maintenance and a health monitor. See
 `supabase/migrations/20261016090100_phase6_autonomy_crons.sql`.
 
-| Job | Schedule (UTC) | Function | Notes |
-| --- | --- | --- | --- |
-| `ingest-feeds` | `*/20 * * * *` | `ingest-feeds` | feeds → validated, deduplicated candidates |
-| `write-desk` | `*/30 * * * *` | `write-desk` | rewrite → verify → score → schedule/review |
-| `publish-scheduler` | `*/10 * * * *` | `publish-scheduler` | releases due posts under the caps |
-| `trend-watch` | `15 */3 * * *` | `trend-watch` | trend scores + content-gap notes |
-| `newsroom-maintenance` | `40 * * * *` | `maintenance` | images, links, endpoints, orphans, stale posts |
-| `phase6-monitor` | `5,35 * * * *` | `phase6-monitor` | health snapshot + alerts (safe to poll) |
-| `auto-publish-morning` | `0 6 * * *` | `auto-publish` | edition orchestrator (ingest + write + publish) |
-| `auto-publish-midday` | `0 12 * * *` | `auto-publish` | edition orchestrator |
-| `auto-publish-evening` | `0 18 * * *` | `auto-publish` | edition orchestrator |
-| `breaking-news-monitor` | `*/30 * * * *` | `breaking-news-monitor` | triggers the orchestrator on a new headline |
-| `notifications-dispatcher` | `*/10 * * * *` | `notifications-dispatcher` | idempotent per slug/kind/day |
-| `validate-feeds-daily` | `30 4 * * *` | `validate-feeds` | feed report |
-| `prune-post-view-events` | `15 3 * * *` | SQL | 90-day retention |
-| `prune-automation` | `25 3 * * *` | SQL | prunes candidates, runs, alerts, trends |
+| Job | Schedule (UTC) | Function | Created as | Notes |
+| --- | --- | --- | --- | --- |
+| `ingest-feeds` | `*/20 * * * *` | `ingest-feeds` | active | feeds → validated, deduplicated candidates |
+| `write-desk` | `*/30 * * * *` | `write-desk` | **inactive** | rewrite → verify → score → schedule/review |
+| `publish-scheduler` | `*/10 * * * *` | `publish-scheduler` | **inactive** | releases due posts under the caps |
+| `trend-watch` | `15 */3 * * *` | `trend-watch` | active | trend scores + content-gap notes |
+| `newsroom-maintenance` | `40 * * * *` | `maintenance` | **inactive** | images, links, endpoints, orphans, stale posts |
+| `phase6-monitor` | `5,35 * * * *` | `phase6-monitor` | active | health snapshot + alerts (safe to poll) |
+| `auto-publish-morning` | `0 6 * * *` | `auto-publish` | **inactive** | edition orchestrator (ingest + write + publish) |
+| `auto-publish-midday` | `0 12 * * *` | `auto-publish` | **inactive** | edition orchestrator |
+| `auto-publish-evening` | `0 18 * * *` | `auto-publish` | **inactive** | edition orchestrator |
+| `breaking-news-monitor` | `*/30 * * * *` | `breaking-news-monitor` | **inactive** | triggers the orchestrator on a new headline |
+| `notifications-dispatcher` | `*/10 * * * *` | `notifications-dispatcher` | **inactive** | reader alerts, idempotent per slug/kind/day |
+| `validate-feeds-daily` | `30 4 * * *` | `validate-feeds` | active | feed report |
+| `prune-post-view-events` | `15 3 * * *` | SQL | active | 90-day retention |
+| `prune-automation` | `25 3 * * *` | SQL | active | prunes candidates, runs, alerts, trends |
 
-Inspect:
+**8 of 14 jobs inactive (gated) / 6 active (safe)** immediately after the
+migration — no publishing-capable job and no maintenance job may run before the
+operator preflight below.
+
+The eight gated jobs are created inactive by the migration itself
+(`select cron.schedule_in_database(name, schedule, $$ … $$, current_database(),
+active := false)`), so a fresh `supabase db push` fails closed: there is no
+window in which publishing or archiving starts before preflight, and no manual
+pause can be missed. `cron.schedule` on its own cannot create an inactive job —
+its three-argument form passes NULL `active`, which pg_cron reads as `true`.
+
+Re-applying the migration set stays safe too: the schedule upsert
+(`on conflict on constraint jobname_username_uniq do update`) rewrites
+`schedule`, `command` and `database` **only** — never `active` — and the gate
+`update` runs again. A `db push` or `db reset` on an already-activated project
+therefore closes the gate again, and the activation steps must be re-run.
 
 ```sql
 select jobname, schedule, active from cron.job order by jobname;
@@ -160,23 +175,29 @@ select status, status_code, left(content, 200), created
 
 ### Pause and resume
 
-`cron.alter_job` flips a job on or off without deleting it, so pausing is always
-reversible. Everything below is safe to run while the newsroom is live.
+Everything below is an `UPDATE` on `cron.job`, so pausing is always reversible
+and never deletes a job or a post.
 
 ```sql
--- Pause only what writes or publishes; ingest and the monitor keep running so
--- you still see candidates arriving and health alerts.
+-- The gate: the canonical statement from the migration, the operator checklist
+-- and the test suite. Closes everything that can publish, spend LLM budget,
+-- alert readers or archive published content; keeps ingestion, trends, the
+-- monitor and both prunes running, so you still see candidates and alerts.
 update cron.job set active = false
- where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
-                   'auto-publish-midday','auto-publish-evening',
-                   'breaking-news-monitor','notifications-dispatcher');
+ where jobname in ('write-desk','publish-scheduler',
+                   'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                   'breaking-news-monitor','notifications-dispatcher',
+                   'newsroom-maintenance');
 
--- Pause the entire loop (nothing is deleted, no post is lost).
+-- Pause the entire loop as well (nothing is deleted, no post is lost).
 update cron.job set active = false;
 
--- Resume.
+-- Resume everything.
 update cron.job set active = true;
 ```
+
+After a gate or resume, `select jobname, active from cron.job order by jobname;`
+must show 8 of 14 (gate) or 14 of 14 (resume) active.
 
 Direct `UPDATE` on `cron.job` is what pg_cron's own `cron_job_cache_invalidate`
 trigger exists for: the change is picked up by the scheduler without a restart
@@ -189,20 +210,29 @@ uses before it re-creates a job.
 
 ### First activation (the Phase 6.1 gate)
 
-The migration creates every job **active**, so `supabase db push` starts the
-loop. Do this in order, on a project that has never run Phase 6 before:
+The migration creates publishing, alerting and maintenance jobs **inactive**,
+so `supabase db push` on a fresh project fails closed: nothing that can publish,
+spend LLM budget, alert readers or archive content can run before you have been
+through this list. Do it in order.
 
 ```bash
-# 1. Apply the migrations, then immediately pause publishing.
+# 1. Apply the migrations, then confirm the gate is closed (it already is).
 supabase db push
-#    SQL editor — the UPDATE form, because cron.alter_job is REVOKEd from public
-#    and only the role that owns the jobs may execute it:
+#    SQL editor — the canonical gate statement. It is a no-op on a fresh
+#    install, and it is what closes the gate on a project migrated before the
+#    fail-closed change. UPDATE, not cron.alter_job: the latter is REVOKEd from
+#    public and only works for the role that owns the jobs.
 #      update cron.job set active = false
-#       where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
-#                         'auto-publish-midday','auto-publish-evening',
-#                         'breaking-news-monitor');
+#       where jobname in ('write-desk','publish-scheduler',
+#                         'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+#                         'breaking-news-monitor','notifications-dispatcher',
+#                         'newsroom-maintenance');
 #    Verify: select jobname, active from cron.job order by jobname;
-#      -> those 6 rows false, ingest-feeds / phase6-monitor still true.
+#      -> 8 of 14 jobs inactive (gated) / 6 active (safe), i.e. those 8 rows
+#         false and ingest-feeds / trend-watch / phase6-monitor /
+#         validate-feeds-daily / prune-post-view-events / prune-automation true.
+#    If the count is not 8/6, stop: migration 20261016090200 closes the gate
+#    again on any project (re-runnable, changes nothing else).
 
 # 2. Secrets — the same value in Vault and in the function environment.
 openssl rand -hex 32
@@ -236,33 +266,48 @@ curl -sS -X POST ".../functions/v1/publish-scheduler" -H "Authorization: Bearer 
 #    Expect published: 1 and metrics.slugs: ["<slug>"]. It stays at 1: a second
 #    call returns published: 0.
 
-# 6. Only now, re-enable the loop.
-#    SQL: update cron.job set active = true
-#          where jobname in ('write-desk','publish-scheduler');
+# 6. Only now, re-enable the loop - in two documented steps.
+#    G1 (publishing):  update cron.job set active = true
+#                       where jobname in ('write-desk','publish-scheduler');
+#    G2 (after 24h):   update cron.job set active = true
+#                       where jobname in ('auto-publish-morning','auto-publish-midday',
+#                                         'auto-publish-evening','breaking-news-monitor',
+#                                         'notifications-dispatcher');
 #    (cron.alter_job(jobid, active := true) is the equivalent API form, for the
 #     role that owns the job - parameter names are part of the signature, so
 #     `active :=` only works with pg_cron 1.4+.)
-#    Leave auto-publish-* and breaking-news-monitor paused for one more day if
-#    you want a quiet first day; the newsroom still publishes on schedule.
+#    G3 (maintenance) is a SEPARATE decision, not part of the publishing
+#    ramp-up: run the query in the paragraph below first, then
+#      update cron.job set active = true
+#       where jobname in ('newsroom-maintenance');
+#    Leaving it inactive is a supported state - ingestion, writing, publishing,
+#    trends, the monitor and both prunes are unaffected.
 
 # 7. Watch for 24 hours.
 curl -sS -X POST ".../functions/v1/phase6-monitor" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
   | jq '{ok, autonomy, problems: .metrics.problems, hours_since_publish: .metrics.hours_since_publish}'
 ```
 
-Before a job that changes a *published* story runs for the first time,
-`newsroom-maintenance` deserves a look: it archives posts older than 730 days
-with fewer than 50 views (status `archived` disappears from the site, sitemaps
-and feeds) and replaces broken featured images. Check what it would touch first:
+`newsroom-maintenance` is the one job that changes *published* stories, so it
+ships gated and its activation is step G3, ordered **after** this pre-check: it
+archives posts older than 730 days with fewer than 50 views (status `archived`
+disappears from the site, sitemaps and feeds) and replaces broken featured
+images. Look at the rows it would touch, then decide:
 
 ```sql
 select slug, published_at, views from public.posts
  where status = 'published' and published_at < now() - interval '730 days' and coalesce(views,0) < 50;
 ```
 
+0 rows on a young site means there is nothing to archive. Rows you consider
+evergreen mean either raising `MAINTENANCE_RULES.archiveAfterDays`
+(`supabase/functions/_shared/maintenance.ts`, then redeploy `maintenance`) or
+leaving `newsroom-maintenance` inactive for good. An archive is reversible:
+`update public.posts set status = 'published', archived_at = null where slug = '<slug>';`
+
 Stop conditions: if `phase6-monitor` returns `ok:false` *for a change you made*,
-if the desk writes nothing for 12 hours, or if any post reads wrong — pause the
-loop with the step 1 UPDATE, fix forward, and re-run steps 4–5. A fresh project
+if the desk writes nothing for 12 hours, or if any post reads wrong — close the
+gate with the step 1 UPDATE, fix forward, and re-run steps 4–5. A fresh project
 reports `ok:false` with "candidate queue empty and nothing scheduled" until the
 first candidates arrive; that is expected, not a failure.
 

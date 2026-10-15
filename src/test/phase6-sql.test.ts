@@ -28,29 +28,25 @@ import {
   scalar,
   type StagingDb,
 } from "./harness/sql-staging.ts";
+import {
+  ACTIVATION_STEPS,
+  ALL_JOBS,
+  GATED_JOB_NAMES,
+  GATE_SQL,
+  SAFE_JOB_NAMES,
+  extractActiveStatements,
+  jobNamesInStatement,
+  normaliseSql,
+} from "./harness/cron-contract.ts";
 
 const PHASE6_SCHEMA = "20261016090000_phase6_autonomy_schema.sql";
 const PHASE6_CRONS = "20261016090100_phase6_autonomy_crons.sql";
+const PHASE6_GATE = "20261016090200_phase6_activation_gate.sql";
+const CHECKLIST = join(process.cwd(), "phase6_activation_checklist.txt");
 
 /** The post statuses the app and the pipeline use (posts_status_check). */
 const VALID_STATUSES = ["draft", "review", "scheduled", "published", "rejected", "archived"];
 
-const EXPECTED_CRON_JOBS: Array<{ name: string; schedule: string; command: string }> = [
-  { name: "ingest-feeds", schedule: "*/20 * * * *", command: "select public.newsroom_trigger('ingest-feeds', '{}'::jsonb, 120000);" },
-  { name: "write-desk", schedule: "*/30 * * * *", command: "select public.newsroom_trigger('write-desk', '{}'::jsonb, 300000);" },
-  { name: "publish-scheduler", schedule: "*/10 * * * *", command: "select public.newsroom_trigger('publish-scheduler', '{}'::jsonb, 90000);" },
-  { name: "trend-watch", schedule: "15 */3 * * *", command: "select public.newsroom_trigger('trend-watch', '{}'::jsonb, 120000);" },
-  { name: "newsroom-maintenance", schedule: "40 * * * *", command: "select public.newsroom_trigger('maintenance', '{}'::jsonb, 240000);" },
-  { name: "validate-feeds-daily", schedule: "30 4 * * *", command: "select public.newsroom_trigger('validate-feeds', '{}'::jsonb, 180000);" },
-  { name: "phase6-monitor", schedule: "5,35 * * * *", command: "select public.newsroom_trigger('phase6-monitor', '{}'::jsonb, 60000);" },
-  { name: "auto-publish-morning", schedule: "0 6 * * *", command: "select public.trigger_auto_publish('morning');" },
-  { name: "auto-publish-midday", schedule: "0 12 * * *", command: "select public.trigger_auto_publish('midday');" },
-  { name: "auto-publish-evening", schedule: "0 18 * * *", command: "select public.trigger_auto_publish('evening');" },
-  { name: "breaking-news-monitor", schedule: "*/30 * * * *", command: "select public.trigger_breaking_news_monitor();" },
-  { name: "notifications-dispatcher", schedule: "*/10 * * * *", command: "select public.trigger_notifications_dispatcher();" },
-  { name: "prune-post-view-events", schedule: "15 3 * * *", command: "select public.prune_post_view_events();" },
-  { name: "prune-automation", schedule: "25 3 * * *", command: "select public.prune_automation_tables();" },
-];
 
 
 let staging: StagingDb;
@@ -88,7 +84,7 @@ describe("migration chain", () => {
     const sources = await scalar<number>(staging.db, "select count(*)::int from public.content_sources");
     expect(sources).toBe(24); // seeded once, `on conflict do nothing` kept it at 24
     const jobs = await scalar<number>(staging.db, "select count(*)::int from cron.job");
-    expect(jobs).toBe(EXPECTED_CRON_JOBS.length);
+    expect(jobs).toBe(ALL_JOBS.length);
   });
 });
 
@@ -386,21 +382,166 @@ describe("candidate queue RPC", () => {
 });
 
 describe("cron schedule and the Vault trigger", () => {
-  it("schedules exactly the intended jobs, once each", async () => {
+  it("schedules exactly the intended jobs, once each, with the intended schedules", async () => {
     const jobs = await rows<{ jobname: string; schedule: string; command: string; active: boolean }>(
       staging.db,
       `select jobname, schedule, command, active from cron.job order by jobname`,
     );
 
-    expect(jobs).toHaveLength(EXPECTED_CRON_JOBS.length);
-    for (const expected of EXPECTED_CRON_JOBS) {
+    expect(jobs).toHaveLength(ALL_JOBS.length);
+    for (const expected of ALL_JOBS) {
       const job = jobs.find((entry) => entry.jobname === expected.name);
       expect(job, `${expected.name} must be scheduled`).toBeDefined();
       expect(job?.schedule).toBe(expected.schedule);
-      expect(job?.active).toBe(true);
       // Whitespace-insensitive: the migration wraps the SQL over two lines.
       expect(job?.command.replace(/\s+/g, " ").trim()).toBe(expected.command);
     }
+
+    // Names are asserted exactly, so a renamed or added job fails loudly.
+    expect(jobs.map((job) => job.jobname).sort()).toEqual([...ALL_JOBS.map((job) => job.name)].sort());
+  });
+
+  it("creates the gate set inactive and the safe jobs active on a fresh install", async () => {
+    // The fail-closed guarantee: a fresh `db push` must not leave any job that
+    // can publish, queue with LLM budget, alert readers or archive published
+    // content in an executing state.
+    const gated = await rows<{ jobname: string; active: boolean }>(
+      staging.db,
+      `select jobname, active from cron.job where jobname = any($1) order by jobname`,
+      [GATED_JOB_NAMES],
+    );
+    expect(gated.map((row) => row.jobname).sort()).toEqual([...GATED_JOB_NAMES].sort());
+    expect(gated.map((row) => row.jobname)).toHaveLength(GATED_JOB_NAMES.length);
+    expect(gated.every((row) => row.active === false), "every gate job must be inactive").toBe(true);
+
+    const safe = await rows<{ jobname: string; active: boolean }>(
+      staging.db,
+      `select jobname, active from cron.job where jobname = any($1) order by jobname`,
+      [SAFE_JOB_NAMES],
+    );
+    expect(safe.map((row) => row.jobname).sort()).toEqual([...SAFE_JOB_NAMES].sort());
+    expect(safe).toHaveLength(SAFE_JOB_NAMES.length);
+    expect(safe.every((row) => row.active === true), "ingestion and monitoring must stay on").toBe(true);
+
+    // Counts, so "8 inactive / 6 active" in the docs is a checked fact.
+    expect(GATED_JOB_NAMES).toHaveLength(8);
+    expect(SAFE_JOB_NAMES).toHaveLength(6);
+    expect(GATED_JOB_NAMES.length + SAFE_JOB_NAMES.length).toBe(ALL_JOBS.length);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`)).toBe(8);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+  });
+
+  it("keeps the gate closed when the migrations are re-applied", async () => {
+    // supabase db reset / a manual re-apply must not open the gate. The
+    // migration unschedules and recreates the jobs, so the gate set is rebuilt
+    // inactive and the safe jobs are rebuilt active.
+    for (const file of [PHASE6_SCHEMA, PHASE6_CRONS, PHASE6_GATE]) {
+      const { sql } = prepareMigrationSql(readMigration(file));
+      await expect(staging.db.exec(sql)).resolves.not.toThrow();
+    }
+
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`)).toBe(8);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+
+    const schedulePreserved = await rows<{ jobname: string; schedule: string; command: string }>(
+      staging.db,
+      `select jobname, schedule, command from cron.job where jobname = any($1)`,
+      [ALL_JOBS.map((job) => job.name)],
+    );
+    for (const expected of ALL_JOBS) {
+      const job = schedulePreserved.find((entry) => entry.jobname === expected.name);
+      expect(job?.schedule, `${expected.name} schedule must survive a re-apply`).toBe(expected.schedule);
+      expect(job?.command.replace(/\s+/g, " ").trim()).toBe(expected.command);
+    }
+  });
+
+  it("keeps the gate closed if the operator activates jobs and the files are re-applied", async () => {
+    // Fail-closed means: re-applying the migration set resets the gate even if
+    // somebody had enabled jobs. The checklist documents that a re-apply
+    // requires re-running the activation steps.
+    await staging.db.exec(ACTIVATION_STEPS[0].sql);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(8);
+
+    for (const file of [PHASE6_CRONS, PHASE6_GATE]) {
+      const { sql } = prepareMigrationSql(readMigration(file));
+      await staging.db.exec(sql);
+    }
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+  });
+
+  it("opens only through the documented activation steps, and only the documented jobs", async () => {
+    // The SQL here is read from phase6_activation_checklist.txt, not typed into
+    // this test: the operator's commands are the ones under test.
+    const checklist = readFileSync(CHECKLIST, "utf8");
+    const documented = extractActiveStatements(checklist, "true")
+      .filter((statement) => jobNamesInStatement(statement).length > 0);
+
+    const expected = ACTIVATION_STEPS.map((step) => normaliseSql(step.sql));
+    expect(documented).toEqual(expected);
+
+    for (const step of ACTIVATION_STEPS) {
+      await staging.db.exec(step.sql);
+
+      const active = await rows<{ jobname: string }>(
+        staging.db,
+        `select jobname from cron.job where active and jobname is not null order by jobname`,
+      );
+      const enabled = active
+        .map((row) => row.jobname)
+        .filter((name) => GATED_JOB_NAMES.includes(name))
+        .sort();
+      expect(enabled, `after ${step.id} exactly the approved gate jobs are live`).toEqual(
+        [...step.activeAfter].sort(),
+      );
+      expect(step.enables.length).toBeGreaterThan(0);
+      // The safe jobs must never be touched by an activation step.
+      for (const name of SAFE_JOB_NAMES) {
+        expect(await scalar<boolean>(staging.db, `select active from cron.job where jobname = $1`, [name])).toBe(true);
+      }
+    }
+
+    // Nothing outside the gate set can ever be enabled by a documented step.
+    for (const step of ACTIVATION_STEPS) {
+      for (const name of step.enables) {
+        expect(GATED_JOB_NAMES, `${name} must be a gate job`).toContain(name);
+      }
+    }
+  });
+
+  it("closes the gate with the canonical statement, and the deep-clean statement is reversible", async () => {
+    // Reset to the post-migration state, then run the one canonical gate
+    // statement the migration, the checklist and OPERATIONS.md all embed.
+    await staging.db.exec(`update cron.job set active = true`);
+    await staging.db.exec(GATE_SQL);
+
+    const inactive = await rows<{ jobname: string }>(
+      staging.db,
+      `select jobname from cron.job where not active order by jobname`,
+    );
+    expect(inactive.map((row) => row.jobname)).toEqual([...GATED_JOB_NAMES].sort());
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`)).toBe(8);
+
+    // Resume everything: one statement, reversible, deletes nothing.
+    await staging.db.exec(`update cron.job set active = true`);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(14);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+
+    // Stop everything: the documented "stop all automation" form.
+    await staging.db.exec(`update cron.job set active = false`);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+
+    // The API form for a single job (pg_cron 1.4+) also works, for the role
+    // that owns the job: alter_job is REVOKEd from public.
+    await staging.db.exec(`select cron.alter_job(jobid, active := true) from cron.job where jobname = 'write-desk'`);
+    expect(await scalar<boolean>(staging.db, `select active from cron.job where jobname = 'write-desk'`)).toBe(true);
+
+    // Leave the database in the post-migration state for the tests below.
+    await staging.db.exec(`update cron.job set active = false`);
+    await staging.db.query(`update cron.job set active = true where jobname = any($1)`, [SAFE_JOB_NAMES]);
   });
 
   it("replaces the previous schedule rather than stacking a second one", async () => {
@@ -408,7 +549,7 @@ describe("cron schedule and the Vault trigger", () => {
     // leave two jobs pointing at the same function.
     const duplicated = await rows<{ jobname: string; n: number }>(
       staging.db,
-      `select jobname, count(*)::int as n from cron.job group by jobname having count(*) > 1`,
+      `select jobname, count(*)::int as n from cron.job where jobname is not null group by jobname having count(*) > 1`,
     );
     expect(duplicated).toEqual([]);
 
@@ -428,63 +569,6 @@ describe("cron schedule and the Vault trigger", () => {
     );
     expect(helpers).toHaveLength(3);
     expect(helpers.every((h) => /public\.(trigger_auto_publish|trigger_breaking_news_monitor|trigger_notifications_dispatcher)\(/.test(h.command))).toBe(true);
-  });
-
-  it("the documented pause/resume procedure flips exactly the publishing-capable jobs", async () => {
-    // This is the SQL the activation checklist tells an operator to run before
-    // the dry run. Publishing-capable = the command chain can set
-    // status='published' (publish-scheduler, the three editions via
-    // auto-publish step 3) or can create new scheduled posts (write-desk) or
-    // can trigger the orchestrator (breaking-news-monitor).
-    const publishingCapable = [
-      "write-desk",
-      "publish-scheduler",
-      "auto-publish-morning",
-      "auto-publish-midday",
-      "auto-publish-evening",
-      "breaking-news-monitor",
-    ];
-
-    await staging.db.exec(`update cron.job set active = false
-      where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
-                        'auto-publish-midday','auto-publish-evening','breaking-news-monitor')`);
-
-    const inactive = await rows<{ jobname: string }>(
-      staging.db,
-      `select jobname from cron.job where not active order by jobname`,
-    );
-    expect(inactive.map((row) => row.jobname).sort()).toEqual([...publishingCapable].sort());
-
-    // Ingest and the monitor must keep running: candidates and alerts are how
-    // the operator sees whether the pipeline is alive.
-    const keepAlive = await rows<{ jobname: string }>(
-      staging.db,
-      `select jobname from cron.job where active and jobname in ('ingest-feeds','phase6-monitor','trend-watch','newsroom-maintenance')`,
-    );
-    expect(keepAlive).toHaveLength(4);
-
-    // Resume brings every job back; nothing was deleted by the pause.
-    await staging.db.exec(`update cron.job set active = true where jobname is not null`);
-    const stillInactive = await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`);
-    expect(stillInactive).toBe(0);
-    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(EXPECTED_CRON_JOBS.length);
-
-    // The equivalent documented API form is also valid (pg_cron 1.4+). It is
-    // REVOKEd from public, so it only works for the role that owns the job.
-    await staging.db.exec(`select cron.alter_job(jobid, active := false) from cron.job where jobname = 'write-desk'`);
-    expect(
-      await scalar<boolean>(staging.db, `select active from cron.job where jobname = 'write-desk'`),
-    ).toBe(false);
-    await staging.db.exec(`select cron.alter_job(jobid, active := true) from cron.job where jobname = 'write-desk'`);
-    expect(
-      await scalar<boolean>(staging.db, `select active from cron.job where jobname = 'write-desk'`),
-    ).toBe(true);
-
-    // Emergency stop: one statement, reversible, deletes nothing.
-    await staging.db.exec(`update cron.job set active = false`);
-    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(0);
-    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(EXPECTED_CRON_JOBS.length);
-    await staging.db.exec(`update cron.job set active = true`);
   });
 
   it("posts to the right URL with the Vault secret and never logs the value", async () => {

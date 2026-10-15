@@ -1,3 +1,172 @@
+PHASE 6.1 CORRECTION - FAIL-CLOSED CRON GATE (targeted safety fix)
+====================================================================
+Date: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
+Audited commit: 9cd5cc0. Base commit for this correction: 9cd5cc0.
+Scope: the four defects found while auditing the activation procedure, and
+nothing else. No deployment, no production SQL, no credential change, no new
+feature, main untouched.
+
+WHAT WAS WRONG AT 9cd5cc0
+-------------------------
+1. RACE: the cron migration created all 14 jobs ACTIVE, so `supabase db push`
+   started publishing immediately. The documented safety barrier was a manual
+   pause AFTER the push - a window in which publish-scheduler (*/10) or
+   auto-publish-midday could publish, and newsroom-maintenance (40 * * * *)
+   could archive, before any operator looked. A pause that must win a race is
+   not a safety barrier.
+2. MISMATCH: the checklist paused seven jobs (including
+   notifications-dispatcher), the test suite tested six, and docs/OPERATIONS.md
+   still listed the old Phase 5 set of five. Three different "safe job sets".
+3. ORDERING: newsroom-maintenance was paused only as a side effect of a
+   blanket update and had no separate approval step, yet it is the one job that
+   changes pages readers can already see (archives >730-day, <50-view posts).
+4. COVERAGE: no test asserted that the jobs are inactive immediately after a
+   fresh migration, or after a migration re-run.
+
+THE FIX (smallest fail-closed design: the row is born inactive)
+--------------------------------------------------------------
+The eight jobs that can publish, spend LLM budget, alert readers or archive
+published content are now created INACTIVE by the migration itself:
+
+  select cron.schedule_in_database('<name>', '<schedule>',
+         $$ <same command as before> $$, current_database(), active := false);
+
+cron.schedule_in_database(name, schedule, command, database, username default
+null, active default 'true') exists from pg_cron 1.4 and is the ONLY SQL entry
+point that can create an inactive job: cron.schedule's three-argument form
+passes NULL `active`, which pg_cron reads as true (verified in the pg_cron
+sources, cron_schedule_named -> ScheduleCronJob, v1.4.0 ... v1.6.4).
+The six safe jobs (ingestion, trends, monitor, feed validation, both prunes)
+keep cron.schedule, so monitoring and ingestion are not silently disabled.
+
+Gated  = created INACTIVE (8): write-desk, publish-scheduler,
+         auto-publish-morning, auto-publish-midday, auto-publish-evening,
+         breaking-news-monitor, notifications-dispatcher, newsroom-maintenance
+Safe   = created ACTIVE   (6): ingest-feeds, trend-watch, phase6-monitor,
+         validate-feeds-daily, prune-post-view-events, prune-automation
+All 14 schedules and commands are unchanged.
+
+One canonical gate statement, identical text in four places (asserted by test):
+  update cron.job set active = false
+   where jobname in ('write-desk','publish-scheduler',
+                     'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor','notifications-dispatcher',
+                     'newsroom-maintenance');
+It lives in migration 20261016090100 section 3b, in the new repair migration
+20261016090200_phase6_activation_gate.sql, in phase6_activation_checklist.txt
+(B2, expanded in section H) and in docs/OPERATIONS.md.
+
+FRESH INSTALL vs RE-RUN (the two behaviours the audit asked for)
+---------------------------------------------------------------
+FRESH INSTALL (`db push` on a project that never ran Phase 6): no window. The
+  gated rows are inserted inactive in the same statement that creates them, so
+  no publishing-capable job and no maintenance job can tick before preflight.
+  Only ingestion, trends, the monitor and the prunes run: they add candidates
+  and alerts and delete nothing published. Verified on the migration text and
+  by executing it in the staging harness (tests below).
+MIGRATION RE-RUN / db reset on an ALREADY-ACTIVATED project: safe and
+  repeatable. The recreate path unschedules the 14 names first, then
+  re-creates them; the upsert is
+  `on conflict on constraint jobname_username_uniq do update set schedule,
+  command, database` - it never touches `active` - and the gate
+  `update ... set active = false` runs again at the end. Net effect: back to
+  8 inactive / 6 active. Verified: the suite enables every job, re-applies the
+  migration, and asserts 8/6 again.
+OPERATOR ACTIVATION (the only way jobs switch on): three documented steps, in
+  order, in the checklist. G1 write-desk + publish-scheduler; G2 (after 24h)
+  the three editions + breaking-news-monitor + notifications-dispatcher; G3
+  newsroom-maintenance ONLY after the B3 archive pre-check has been read and
+  approved. G3 is deliberately separate: an operator who has not reviewed the
+  730-day/50-view rows never has to authorise archiving, and leaving the job
+  inactive breaks nothing else. The test reads these exact statements out of
+  the checklist file and runs them, so the doc and the tested behaviour cannot
+  drift apart.
+
+FILES CHANGED IN THIS CORRECTION
+--------------------------------
+supabase/migrations/20261016090100_phase6_autonomy_crons.sql  (patched)
+   header now documents the gate; 8 gated jobs created via
+   cron.schedule_in_database(..., active := false); section 3b holds the
+   canonical gate statement; verification comment updated to 8 inactive / 6
+   active of 14. Schedules and commands unchanged.
+supabase/migrations/20261016090200_phase6_activation_gate.sql  (new)
+   idempotent repair migration: the same gate statement for projects already
+   pushed before this fix. Re-runnable; touches nothing else.
+src/test/harness/cron-contract.ts  (new)
+   the single source of truth: 14 jobs (name/schedule/verbatim command/
+   category), the 8/6 split, GATE_SQL, ACTIVATION_STEPS, and the parsers the
+   docs are tested with.
+src/test/harness/sql-staging.ts  (patched)
+   cron.schedule_in_database stub with the real signature and semantics
+   (inserts active=false; conflict update leaves `active` alone; jobname unique
+   per (jobname, username) as in 1.2+), plus NULL jobname in the 2-arg
+   cron.schedule, so the harness reproduces the platform behaviour the fix
+   depends on.
+src/test/phase6-sql.test.ts  (patched)
+   19 tests (was 14): 7 assert the gate - exact schedules, inactive/active
+   immediately after migration, still 8/6 after a re-run, still 8/6 after the
+   operator activates everything and the migration is re-applied, only the
+   documented steps open it (parsed out of the checklist), the gate statement
+   and the resume/stop statements stay reversible, and the retired Phase 5
+   names do not come back.
+src/test/repo-integrity.test.ts  (patched)
+   +5 tests: the gate statement is byte-identical (whitespace-normalised) in
+   the migration, the repair migration, the checklist and OPERATIONS.md; every
+   `active = false` statement in the docs names exactly the gated set; both
+   docs state the same "8 of 14 jobs inactive (gated) / 6 active (safe)";
+   the migration creates exactly the 8 via schedule_in_database and never
+   `set active = true`; the retired wording is gone.
+phase6_activation_checklist.txt  (rewritten sections A2/B1/B2/B3/G/H)
+   eight-job gate with the canonical statement, the four job classes spelled
+   out (publishing-capable / content generation / reader-alert / destructive
+   maintenance / safe-operational), the "8 of 14 inactive / 6 active"
+   expectation, G1/G2/G3 with maintenance ordered after the B3 pre-check, and
+   a section H that is triggerable and reversible.
+docs/OPERATIONS.md  (section 3 + activation block)
+   "Created as" column for all 14 jobs, the fresh-install-fails-closed
+   explanation, the canonical gate SQL in Pause and resume, and G3 as a
+   separate maintenance approval.
+
+EVIDENCE - COMMANDS RUN (all local, all offline)
+------------------------------------------------
+npx vitest run src/test/phase6-sql.test.ts        -> 19 passed / 0 failed
+npx vitest run src/test/repo-integrity.test.ts    -> 23 passed / 0 failed
+npx vitest run src/test/phase6-orchestration.test.ts -> 31 passed (unchanged)
+npx vitest run src/test/phase6-secrets.test.ts    -> 10 passed (unchanged)
+npm run verify   (lint + tsc + vitest + build)    -> exit 0; 12 files / 203
+                                                     tests passed (194 before
+                                                     this correction, +9)
+npm run check:functions                           -> exit 0; 13/13 entrypoints
+                                                     type-check, deno 2.9.6
+Mutation checks (deliberate drift, then reverted) -> deleting
+  'newsroom-maintenance' from the OPERATIONS.md gate statement fails 2
+  repo-integrity tests; changing the checklist G1 statement to name only
+  write-desk fails the phase6-sql checklist-parity test. The guards have
+  teeth, they are not tautologies.
+Staging-harness probe (PGlite, real PostgreSQL 18.6): schedule_in_database
+  with active := false inserts active=false; re-scheduling the same job name
+  updates schedule and leaves active untouched; the operator gate then flips
+  exactly the 8 documented names.
+
+WHAT THIS DOES NOT PROVE (honest limits)
+----------------------------------------
+NOT VERIFIED  The live project's cron.job table. Network egress to
+              *.supabase.co is unavailable in this environment and no
+              Supabase credential exists, so the current state of the live
+              pg_cron jobs is unknown - BLOCKED, not "fine".
+NOT VERIFIED  That the deployed pg_cron is >= 1.4. The migration now needs
+              schedule_in_database; pg_cron has shipped it since 1.4 (2021)
+              and Supabase ships 1.6.x, but the live extversion was not read.
+              Migration 20261016090200 is the repair path if an older one is
+              found: it closes the gate on such a project regardless.
+NOT VERIFIED  pg_cron's clock and the statement-level trigger firing in
+              production: the harness reproduces the schema and the upsert
+              semantics, not the scheduler thread.
+NOT VERIFIED  pg_cron's `cron.schedule` set-returning usage (only its source
+              and schema were read).
+The 5 live items listed in section 2 of this file are unchanged and still
+BLOCKED.
+
 PHASE 6.1 - LIVE DEPLOYMENT / INTEGRATION VERIFICATION
 =======================================================
 Date: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
@@ -47,9 +216,10 @@ PASS  RPCs: all 7 service-role functions are SECURITY DEFINER with a pinned
       candidate). prune_automation_tables() deletes only past-retention rows.
       newsroom_status / newsroom_llm_calls_today / category_published_count
       return the documented shapes and numbers.
-PASS  Cron: exactly the 14 intended jobs, once each, active, with the exact
+PASS  Cron: exactly the 14 intended jobs, once each, with the exact
       command and timeout from the migration (string-equal after whitespace
-      normalisation) - including the 3 editions, the 4 Phase 5 jobs routed
+      normalisation), and with the intended active state: 8 inactive / 6
+      active - including the 3 editions, the 4 Phase 5 jobs routed
       through their helpers, and both prunes. The retired Phase 5 job names do
       not reappear.
 PASS  Vault -> trigger -> function: posts to
@@ -94,8 +264,12 @@ Each item names the command and the expected result, so it is a checklist.
 BLOCKED  Apply migrations: `supabase link --project-ref ruusbjlabbojpbawbphc`
          + `supabase db push` -> 12 migrations, 0 errors. Then
          `select jobname, schedule, active from cron.job order by 1;`
-         -> 14 rows, all active (the loop starts immediately - pause first,
-         see OPERATIONS.md "First activation").
+         -> 14 rows: 8 inactive (write-desk, publish-scheduler,
+         auto-publish-*, breaking-news-monitor, notifications-dispatcher,
+         newsroom-maintenance) and 6 active (ingest-feeds, trend-watch,
+         phase6-monitor, validate-feeds-daily, prune-post-view-events,
+         prune-automation). Nothing publishes until the operator runs the
+         documented G1-G3 steps (see the correction section above).
 BLOCKED  Deploy functions:
          `supabase functions deploy ingest-feeds write-desk publish-scheduler
           trend-watch maintenance phase6-monitor auto-publish`
@@ -182,32 +356,35 @@ Headroom: publishing is capped at 18/day while the queue fills with hundreds of
 
 6. SAFE ACTIVATION (order matters)
 ----------------------------------
-The migration creates the cron jobs ACTIVE, so `supabase db push` starts the
-loop. Instead:
- 1. db push, then immediately pause the writing/publishing jobs:
-      select cron.alter_job(jobid, active := false) from cron.job
-       where jobname in ('write-desk','publish-scheduler',
-             'auto-publish-morning','auto-publish-midday','auto-publish-evening',
-             'breaking-news-monitor','notifications-dispatcher');
-    (ingest + phase6-monitor stay on so candidates and alerts are visible)
+SUPERSEDED IN PLACE - the migration no longer creates the jobs active. The
+corrected procedure is the correction section at the top of this file and
+phase6_activation_checklist.txt. In short:
+ 1. `supabase db push`. The gate is already closed by the migration; run the
+    canonical gate `update` anyway (B2) to prove it, and to repair a project
+    migrated before the fix. Expect 8 inactive / 6 active.
  2. Set the secrets (Vault + function env, identical value).
  3. Deploy functions; confirm an unauthenticated POST returns 401.
- 4. Manual dry run, one stage at a time (section 2) - do not enable publishing
-    before this passes.
- 5. Re-enable write-desk + publish-scheduler, watch 24h, then re-enable the
-    editions and breaking-news-monitor.
+ 4. Manual dry run, one stage at a time (section 2) - publishing jobs are still
+    inactive, so nothing can go live behind you.
+ 5. G1: enable write-desk + publish-scheduler. Watch 24h.
+ 6. G2: enable the three editions, breaking-news-monitor and
+    notifications-dispatcher.
+ 7. G3 (separate decision): read the B3 archive pre-check, then enable
+    newsroom-maintenance - or leave it inactive indefinitely.
 Stop conditions: monitor ok:false, nothing written in 12h, or any post that
-reads wrong -> pause with the block above, fix, repeat steps 4-5.
+reads wrong -> close the gate with the B2 statement, fix, repeat steps 4-6.
 
 7. EMERGENCY STOP
 -----------------
-  select cron.alter_job(jobid, active := false) from cron.job where jobname in
-    ('write-desk','publish-scheduler','auto-publish-morning','auto-publish-midday',
-     'auto-publish-evening','breaking-news-monitor');   -- stop publishing
-  update cron.job set active = false;                    -- stop everything
-  update public.content_sources set active = false;      -- stop one/all feeds
+  update cron.job set active = false
+   where jobname in ('write-desk','publish-scheduler',
+                     'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor','notifications-dispatcher',
+                     'newsroom-maintenance');                 -- the canonical gate
+  update cron.job set active = false;                       -- stop everything
+  update public.content_sources set active = false;          -- stop one/all feeds
 Nothing is deleted: scheduled posts stay scheduled and resume when the jobs are
-re-enabled.
+re-enabled. See section H of phase6_activation_checklist.txt.
 
 8. FINAL STATUS PER DELIVERABLE
 -------------------------------
@@ -256,6 +433,15 @@ src/test/setup.ts                   jsdom shims guarded for node-env tests
 supabase/functions/breaking-news-monitor/index.ts   DOMParser -> parseFeedXml
 supabase/functions/_shared/dedupe.ts                remove unused constant
 package.json                        pglite devDependency + check:functions
+--- added by the fail-closed cron-gate correction (see the section above) ----
+supabase/migrations/20261016090100_phase6_autonomy_crons.sql   gate + inactive
+supabase/migrations/20261016090200_phase6_activation_gate.sql  new (repair)
+src/test/harness/cron-contract.ts                             new (contract)
+src/test/harness/sql-staging.ts                               schedule_in_database
+src/test/phase6-sql.test.ts                                   +5 cron gate tests
+src/test/repo-integrity.test.ts                               +5 cross-file tests
+phase6_activation_checklist.txt                               A2/B1/B2/B3/G/H
+docs/OPERATIONS.md                                            section 3 + ramp-up
 .env.example, README.md, docs/OPERATIONS.md   secrets, activation, tooling
 
 11. REMAINING RISKS
