@@ -158,6 +158,35 @@ begin
   return net.http_post(url := url, headers := headers, timeout_milliseconds := timeout_milliseconds);
 end $$;
 
+-- cron.alter_job — parameter names and types copied verbatim from
+-- citusdata/pg_cron pg_cron--1.3--1.4.sql (identical in every tag from v1.4.0
+-- to v1.6.4). Named-argument calls only work if these names match exactly,
+-- which is why they are reproduced literally rather than invented:
+--   cron.alter_job(job_id bigint, schedule text default null, command text
+--   default null, database text default null, username text default null,
+--   active boolean default null) returns void
+-- The real function is REVOKEd from public ("admin should decide whether
+-- alter_job is safe by explicitly granting execute"); the stub mirrors that.
+create or replace function cron.alter_job(
+  job_id bigint,
+  schedule text default null,
+  command text default null,
+  database text default null,
+  username text default null,
+  active boolean default null
+) returns void language plpgsql as $$
+begin
+  update cron.job
+     set schedule = coalesce(alter_job.schedule, cron.job.schedule),
+         command  = coalesce(alter_job.command, cron.job.command),
+         database = coalesce(alter_job.database, cron.job.database),
+         username = coalesce(alter_job.username, cron.job.username),
+         active   = coalesce(alter_job.active, cron.job.active)
+   where jobid = alter_job.job_id;
+end $$;
+
+revoke all on function cron.alter_job(bigint, text, text, text, text, boolean) from public;
+
 create or replace function cron.schedule(p_job_name text, p_schedule text, p_command text)
 returns bigint language plpgsql as $$
 declare existing_id bigint; result_id bigint;

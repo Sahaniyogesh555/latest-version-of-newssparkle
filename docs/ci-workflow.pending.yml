@@ -9,6 +9,15 @@
 # To activate it, copy this file to .github/workflows/ci.yml and commit it with
 # an account/token that has the `workflows` scope (the GitHub web UI works too).
 # Until then `npm run verify` is the same gate, run locally.
+#
+# KNOWN GAP (audited 2026-10-15): this workflow does not run the Deno check, so
+# CI would not catch an edge function that uses a browser-only global (that is
+# how a silent `DOMParser` failure reached production once already; see
+# phase6_activation_checklist.txt section D). Verified command to add when the
+# file is installed:
+#   - run: npm i -D deno && npm run check:functions
+# (npm run check:functions finds node_modules/.bin/deno and self-skips when no
+#  deno binary is present, so this step cannot break a build that lacks one.)
 
 name: CI
 

@@ -107,6 +107,9 @@ BLOCKED  Create secrets: vault.create_secret('<32-byte hex>',
          AUTO_PUBLISH_SECRET=<same value>`. Expect no "missing from Vault"
          warning and no 401 in net._http_response.
 BLOCKED  Controlled live end-to-end (publishing jobs paused):
+         (audited and corrected in phase6_activation_checklist.txt — the
+          scheduler call in step 4 does NOT publish immediately, because the
+          desk schedules a story one minimum gap or more into the future)
            1. POST ingest-feeds {"maxSources":3} -> ok:true, candidates added,
               a pipeline_runs row written
            2. select count(*) from ingested_items where status='new';

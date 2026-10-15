@@ -17,6 +17,7 @@ import {
   runWriteDesk,
   type PipelineDeps,
 } from "../../supabase/functions/_shared/pipeline.ts";
+import { PUBLISH_LIMITS } from "../../supabase/functions/_shared/schedule.ts";
 import type { AiConfig } from "../../supabase/functions/_shared/ai.ts";
 import { createFakeDb, ingestedFixture, scheduledPostFixture, sourceFixture } from "./fixtures/fake-db.ts";
 import {
@@ -213,6 +214,16 @@ describe("write-desk", () => {
     expect((post.source_refs as unknown[]).length).toBe(1);
     expect(post.quality_report?.schema).toBeTruthy();
 
+    // Dry-run contract for the Phase 6.1 activation steps: a freshly written
+    // story must NOT become due the moment it is written. nextSlot() aligns the
+    // post with the edition plan, so the earliest it can be released is one
+    // minimum gap (25 min) after the write. An operator following the smoke
+    // test therefore must wait for that slot (or force it explicitly) — running
+    // publish-scheduler in the same minute is supposed to publish nothing.
+    const deltaMinutes = (Date.parse(String(post.scheduled_for)) - NOW.getTime()) / 60_000;
+    expect(deltaMinutes).toBeGreaterThanOrEqual(24);
+    expect(deltaMinutes).toBeLessThanOrEqual(PUBLISH_LIMITS.maxLookaheadHours * 60);
+
     // The candidate is consumed, and a telemetry row is written.
     expect(state.ingested[0].status).toBe("used");
     expect(state.runs[0].llm_calls).toBeGreaterThanOrEqual(2);
@@ -345,6 +356,44 @@ describe("write-desk", () => {
 /* -------------------------------------------------------------------------- */
 /* Scheduler                                                                  */
 /* -------------------------------------------------------------------------- */
+
+describe("activation smoke test (write then publish by hand)", () => {
+  // Mirrors the ordered dry run in docs/OPERATIONS.md / the activation
+  // checklist: write exactly one story, confirm nothing goes live on its own,
+  // then force that one story due and confirm the scheduler releases exactly
+  // one - no burst, no cap breach, nothing left published by accident.
+  it("does not publish a freshly written story, then releases exactly one when it is due", async () => {
+    const { db, state } = createFakeDb({ ingested: [ingestedFixture()], llmCallsToday: 0 });
+
+    const wrote = await runWriteDesk(deps({ db, fetchImpl: aiFetch({}) }), { edition: "midday", limit: 1 });
+    expect(wrote.itemsOut).toBe(1);
+    const written = state.inserts[0];
+    expect(written.status).toBe("scheduled");
+    expect(state.posts.filter((post) => post.status === "published")).toHaveLength(0);
+
+    // The scheduler is a no-op until the planned slot arrives.
+    const early = await runPublishScheduler(deps({ db }));
+    expect(early.itemsOut).toBe(0);
+    expect(early.metrics.due).toBe(0);
+    expect(state.posts.filter((post) => post.status === "published")).toHaveLength(0);
+
+    // Operator gesture: pull that one story forward (the checklist's SQL).
+    const row = state.posts.find((post) => post.slug === written.slug)!;
+    row.scheduled_for = new Date(NOW.getTime() - 60_000).toISOString();
+
+    const released = await runPublishScheduler(deps({ db, now: new Date(NOW.getTime() + 60_000) }));
+    expect(released.itemsOut).toBe(1);
+    expect(released.metrics.slugs).toEqual([written.slug]);
+    const published = state.posts.filter((post) => post.status === "published");
+    expect(published).toHaveLength(1);
+    expect(published[0].published_by).toBe("automation");
+    expect(published[0].published_at).toBeTruthy();
+
+    // And it stays at one: a second run has nothing left to release.
+    const again = await runPublishScheduler(deps({ db, now: new Date(NOW.getTime() + 120_000) }));
+    expect(again.itemsOut).toBe(0);
+  });
+});
 
 describe("publish-scheduler", () => {
   it("publishes due stories and respects the per-run burst limit", async () => {

@@ -430,6 +430,63 @@ describe("cron schedule and the Vault trigger", () => {
     expect(helpers.every((h) => /public\.(trigger_auto_publish|trigger_breaking_news_monitor|trigger_notifications_dispatcher)\(/.test(h.command))).toBe(true);
   });
 
+  it("the documented pause/resume procedure flips exactly the publishing-capable jobs", async () => {
+    // This is the SQL the activation checklist tells an operator to run before
+    // the dry run. Publishing-capable = the command chain can set
+    // status='published' (publish-scheduler, the three editions via
+    // auto-publish step 3) or can create new scheduled posts (write-desk) or
+    // can trigger the orchestrator (breaking-news-monitor).
+    const publishingCapable = [
+      "write-desk",
+      "publish-scheduler",
+      "auto-publish-morning",
+      "auto-publish-midday",
+      "auto-publish-evening",
+      "breaking-news-monitor",
+    ];
+
+    await staging.db.exec(`update cron.job set active = false
+      where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
+                        'auto-publish-midday','auto-publish-evening','breaking-news-monitor')`);
+
+    const inactive = await rows<{ jobname: string }>(
+      staging.db,
+      `select jobname from cron.job where not active order by jobname`,
+    );
+    expect(inactive.map((row) => row.jobname).sort()).toEqual([...publishingCapable].sort());
+
+    // Ingest and the monitor must keep running: candidates and alerts are how
+    // the operator sees whether the pipeline is alive.
+    const keepAlive = await rows<{ jobname: string }>(
+      staging.db,
+      `select jobname from cron.job where active and jobname in ('ingest-feeds','phase6-monitor','trend-watch','newsroom-maintenance')`,
+    );
+    expect(keepAlive).toHaveLength(4);
+
+    // Resume brings every job back; nothing was deleted by the pause.
+    await staging.db.exec(`update cron.job set active = true where jobname is not null`);
+    const stillInactive = await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`);
+    expect(stillInactive).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(EXPECTED_CRON_JOBS.length);
+
+    // The equivalent documented API form is also valid (pg_cron 1.4+). It is
+    // REVOKEd from public, so it only works for the role that owns the job.
+    await staging.db.exec(`select cron.alter_job(jobid, active := false) from cron.job where jobname = 'write-desk'`);
+    expect(
+      await scalar<boolean>(staging.db, `select active from cron.job where jobname = 'write-desk'`),
+    ).toBe(false);
+    await staging.db.exec(`select cron.alter_job(jobid, active := true) from cron.job where jobname = 'write-desk'`);
+    expect(
+      await scalar<boolean>(staging.db, `select active from cron.job where jobname = 'write-desk'`),
+    ).toBe(true);
+
+    // Emergency stop: one statement, reversible, deletes nothing.
+    await staging.db.exec(`update cron.job set active = false`);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(EXPECTED_CRON_JOBS.length);
+    await staging.db.exec(`update cron.job set active = true`);
+  });
+
   it("posts to the right URL with the Vault secret and never logs the value", async () => {
     const secretValue = "test-secret-value-not-a-real-credential";
     await staging.db.exec(`select vault.create_secret('${secretValue}', 'auto_publish_secret', 'staging test')`);

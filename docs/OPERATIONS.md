@@ -166,18 +166,23 @@ reversible. Everything below is safe to run while the newsroom is live.
 ```sql
 -- Pause only what writes or publishes; ingest and the monitor keep running so
 -- you still see candidates arriving and health alerts.
-select cron.alter_job(jobid, active := false)
-  from cron.job
+update cron.job set active = false
  where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
                    'auto-publish-midday','auto-publish-evening',
                    'breaking-news-monitor','notifications-dispatcher');
 
 -- Pause the entire loop (nothing is deleted, no post is lost).
-select cron.alter_job(jobid, active := false) from cron.job;
+update cron.job set active = false;
 
 -- Resume.
-select cron.alter_job(jobid, active := true) from cron.job;
+update cron.job set active = true;
 ```
+
+Direct `UPDATE` on `cron.job` is what pg_cron's own `cron_job_cache_invalidate`
+trigger exists for: the change is picked up by the scheduler without a restart
+(verified in the pg_cron sources, v1.4.0 … v1.6.4). `cron.alter_job(job_id,
+active := false)` is the documented API equivalent, but it is REVOKEd from
+`public`, so it only works for the role that owns the job.
 
 `cron.unschedule('jobname')` is the permanent version and is what the migration
 uses before it re-creates a job.
@@ -190,7 +195,14 @@ loop. Do this in order, on a project that has never run Phase 6 before:
 ```bash
 # 1. Apply the migrations, then immediately pause publishing.
 supabase db push
-#    SQL editor: run the first alter_job block above (writes + publishing only).
+#    SQL editor — the UPDATE form, because cron.alter_job is REVOKEd from public
+#    and only the role that owns the jobs may execute it:
+#      update cron.job set active = false
+#       where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
+#                         'auto-publish-midday','auto-publish-evening',
+#                         'breaking-news-monitor');
+#    Verify: select jobname, active from cron.job order by jobname;
+#      -> those 6 rows false, ingest-feeds / phase6-monitor still true.
 
 # 2. Secrets — the same value in Vault and in the function environment.
 openssl rand -hex 32
@@ -213,12 +225,23 @@ curl -sS -X POST ".../functions/v1/write-desk" -H "Authorization: Bearer $AUTO_P
 select slug, status, scheduled_for, quality_score from public.posts order by created_at desc limit 5;
 
 # 5. Release exactly one story by hand and read it in the browser.
+#    IMPORTANT: the desk schedules a story one minimum gap (25 min) or more into
+#    the future - measured at 55 minutes for the midday edition - so calling the
+#    scheduler straight away correctly publishes NOTHING (metrics.due = 0).
+#    Either wait for the slot, or pull that one story forward first:
+#      update public.posts set scheduled_for = now() - interval '1 minute'
+#       where slug = '<slug-from-step-4>';
 curl -sS -X POST ".../functions/v1/publish-scheduler" -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
   -d '{"limit":1}' | jq '{ok, published: .metrics.published, today: .metrics.published_today}'
+#    Expect published: 1 and metrics.slugs: ["<slug>"]. It stays at 1: a second
+#    call returns published: 0.
 
 # 6. Only now, re-enable the loop.
-#    SQL: select cron.alter_job(jobid, active := true)
-#           from cron.job where jobname in ('write-desk','publish-scheduler');
+#    SQL: update cron.job set active = true
+#          where jobname in ('write-desk','publish-scheduler');
+#    (cron.alter_job(jobid, active := true) is the equivalent API form, for the
+#     role that owns the job - parameter names are part of the signature, so
+#     `active :=` only works with pg_cron 1.4+.)
 #    Leave auto-publish-* and breaking-news-monitor paused for one more day if
 #    you want a quiet first day; the newsroom still publishes on schedule.
 
@@ -227,9 +250,24 @@ curl -sS -X POST ".../functions/v1/phase6-monitor" -H "Authorization: Bearer $AU
   | jq '{ok, autonomy, problems: .metrics.problems, hours_since_publish: .metrics.hours_since_publish}'
 ```
 
-Stop conditions: if `phase6-monitor` returns `ok:false`, if the desk writes
-nothing for 12 hours, or if any post reads wrong — pause the loop (first
-`alter_job` block), fix forward, and re-run steps 4–5.
+Before a job that changes a *published* story runs for the first time,
+`newsroom-maintenance` deserves a look: it archives posts older than 730 days
+with fewer than 50 views (status `archived` disappears from the site, sitemaps
+and feeds) and replaces broken featured images. Check what it would touch first:
+
+```sql
+select slug, published_at, views from public.posts
+ where status = 'published' and published_at < now() - interval '730 days' and coalesce(views,0) < 50;
+```
+
+Stop conditions: if `phase6-monitor` returns `ok:false` *for a change you made*,
+if the desk writes nothing for 12 hours, or if any post reads wrong — pause the
+loop with the step 1 UPDATE, fix forward, and re-run steps 4–5. A fresh project
+reports `ok:false` with "candidate queue empty and nothing scheduled" until the
+first candidates arrive; that is expected, not a failure.
+
+The audited, step-by-step version of this procedure (with expected outputs and
+rollback for each step) is `phase6_activation_checklist.txt` in the repo root.
 
 ### Health check
 

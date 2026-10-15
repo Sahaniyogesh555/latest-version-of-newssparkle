@@ -1,0 +1,477 @@
+PHASE 6.1 AUDIT — PRODUCTION ACTIVATION CHECKLIST
+==================================================
+Audited: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
+Project ref: ruusbjlabbojpbawbphc
+Status of this document: nothing here has been executed against the live
+project. Every step is labelled PASS (verified locally with real engines, or
+proven by reading the code) or BLOCKED (needs the real dashboard/CLI and
+credentials this environment does not have).
+
+How to read a step: DO (exact command) -> EXPECT (what proves it worked) ->
+IF IT FAILS (the stop/rollback action). Do not continue past a failed step.
+
+--------------------------------------------------------------------------------
+SECTION 0 — WHAT IS ALREADY VERIFIED (do not redo)
+--------------------------------------------------------------------------------
+PASS  All 12 migrations apply in filename order against real PostgreSQL 18.6,
+      with only the pg_cron/pg_net/pgcrypto `create extension` lines stubbed.
+      src/test/phase6-sql.test.ts (15 tests).
+PASS  Both Phase 6 migrations are re-runnable (idempotent): 24 sources stay 24,
+      14 cron jobs stay 14.
+PASS  RLS/privileges: anon + authenticated hold no SELECT/INSERT on any
+      automation table; posts keeps its published-only read policy.
+PASS  The 7 service-role RPCs are SECURITY DEFINER with a pinned search_path.
+PASS  The 14 cron commands/schedules/timeouts in the database match the
+      migration string for string.
+PASS  The Vault trigger sends `Authorization: Bearer <auto_publish_secret>` to
+      <newsroom_base_url>/functions/v1/<function>; no secret in any URL or file.
+PASS  All 13 edge function entrypoints type-check on real Deno 2.9.6
+      (`npm run check:functions`); no function uses a browser-only global.
+PASS  The written-then-published flow: a fresh story is never immediately live,
+      and forcing its slot releases exactly one article.
+      src/test/phase6-orchestration.test.ts (31 tests).
+PASS  The pause/resume/emergency-stop SQL used below is valid and flips exactly
+      the intended job rows (phase6-sql.test.ts).
+BLOCKED  Everything downstream of "does the live project behave the same":
+      migrations applied, functions deployed, Vault contents, secret values,
+      real feed reachability, real model output, pg_cron actually ticking.
+
+--------------------------------------------------------------------------------
+SECTION A — PRE-FLIGHT (read-only, no changes)
+--------------------------------------------------------------------------------
+A1. Confirm you are pointed at the right project.
+    DO     supabase projects list   |   or read project_id in supabase/config.toml
+    EXPECT project_id = ruusbjlabbojpbawbphc (the repo's only project ref).
+    NOTE   The only other ref in the repo (gjmmnqtfvnjlwzqwzrzu) is inside a
+           historical migration, not the current project. See Section F.
+    BLOCKED until the CLI is authenticated on your machine.
+
+A2. Record the "before" state so you can prove what changed.
+    DO     select count(*) filter (where status='published') as published,
+                  count(*) filter (where status='scheduled') as scheduled
+             from public.posts;
+           select jobid, jobname, schedule, active from cron.job order by jobname;
+           select extversion from pg_extension where extname = 'pg_cron';
+    EXPECT Before step B1 the cron query errors (relation cron.job missing) —
+           that is normal on a project that has never run Phase 6. After B1 you
+           must see exactly 14 rows.
+    NOTE   Record extversion (expect 1.4+, typically 1.6.x). The pause commands
+           in this checklist do NOT depend on that version; cron.alter_job does.
+    BLOCKED (needs dashboard/SQL editor).
+
+--------------------------------------------------------------------------------
+SECTION B — APPLY MIGRATIONS AND PAUSE, IN THIS ORDER
+--------------------------------------------------------------------------------
+B1. Apply the migrations.
+    DO     supabase link --project-ref ruusbjlabbojpbawbphc
+           supabase db push
+    EXPECT 12 migrations applied, 0 errors. WARNING: the last Phase 6 migration
+           creates all 14 cron jobs ACTIVE, so the loop starts the moment this
+           succeeds — go straight to B2.
+    IF IT FAILS
+           - Error on an already-applied migration: nothing to do, it is
+             recorded in supabase_migrations.schema_migrations.
+           - Error inside 20261016090000_phase6_autonomy_schema.sql: stop, do
+             not retry blindly. That file is idempotent (create if not exists,
+             add column if not exists), and the failing statement is reported
+             verbatim by `db push`.
+           - Rollback: nothing in Phase 6 drops or rewrites existing posts. The
+             only destructive-looking statements are `drop constraint if
+             exists posts_status_check` (re-created in the same transaction) and
+             `drop trigger if exists ... touch_updated_at` (re-created). To
+             fully back out, pause all jobs (B2) and restore from your Supabase
+             backup; do not `drop schema`.
+    BLOCKED (needs CLI + DB password).
+
+B2. IMMEDIATELY pause everything that writes, publishes or alerts.
+    DO     update cron.job set active = false
+            where jobname in ('write-desk','publish-scheduler',
+                              'auto-publish-morning','auto-publish-midday',
+                              'auto-publish-evening','breaking-news-monitor',
+                              'notifications-dispatcher');
+    WHY THESE SIX — evidence, not a guess:
+           - publish-scheduler: the only place a post becomes published
+             (pipeline.ts runPublishScheduler sets status='published'). Cron
+             `*/10 * * * *`.
+           - auto-publish-morning/midday/evening: `auto-publish` step 3 calls
+             the same runPublishScheduler, so an edition run publishes real
+             articles. Cron `0 6|12|18 * * *`.
+           - write-desk: cannot publish (it writes status
+             scheduled/review/rejected only, published_at null) but it spends
+             LLM calls and queues stories that would go live when the scheduler
+             is re-enabled.
+           - breaking-news-monitor: its whole job is to call auto-publish, i.e.
+             publishing-capable. Cron `*/30 * * * *`.
+           - notifications-dispatcher: publishes nothing, but writes
+             reader-facing alerts about a just-published post. Paused so a test
+             article cannot ping readers.
+    DELIBERATELY LEFT RUNNING (safe, and they are how you watch):
+           - ingest-feeds: candidates only, no posts.
+           - phase6-monitor: reads + writes alerts only.
+           - trend-watch, newsroom-maintenance, validate-feeds-daily, prune-*.
+    EXPECT  select jobname, active from cron.job order by jobname;
+            -> exactly those 6 rows false; ingest-feeds and phase6-monitor true.
+    IF IT FAILS
+           - "permission denied for table job": you are running as a role that
+             does not own the jobs. Run it as the same role the migration used
+             (the SQL editor's postgres role).
+           - Unsure who owns them: select jobname, username, active from cron.job;
+           - Verified alternative for the owning role:
+             select cron.alter_job(jobid, active := false) from cron.job
+              where jobname in (...same list...);
+             (pg_cron 1.4+; the function is REVOKEd from public, so it only
+             works for the owner. The parameter is named `active` — a wrong name
+             fails with "function cron.alter_job(bigint, active => boolean)
+             does not exist", which is exactly how this was caught in testing.)
+    PASS (SQL form + row effect verified offline) / BLOCKED (live execution).
+
+B3. Maintenance safety check before that job ever runs unattended.
+    DO     select slug, published_at, views from public.posts
+            where status = 'published'
+              and published_at < now() - interval '730 days'
+              and coalesce(views,0) < 50;
+    WHY    newsroom-maintenance archives posts older than 730 days with fewer
+           than 50 views (status -> 'archived'). Archived posts disappear from
+           the site, sitemaps and feeds, because both RLS and the frontend
+           filter on status='published'.
+    EXPECT On a young site: 0 rows. If it returns rows you consider evergreen,
+           either raise MAINTENANCE_RULES.archiveAfterDays before enabling
+           maintenance, or pause `newsroom-maintenance` separately.
+    IF IT FAILS  Nothing to fail: if you are unsure, keep
+           `newsroom-maintenance` paused (`update cron.job set active = false
+           where jobname = 'newsroom-maintenance';`) and enable it later.
+    BLOCKED (needs live data).
+
+--------------------------------------------------------------------------------
+SECTION C — SECRETS (VALUES NEVER GO IN THE REPO OR IN THIS FILE)
+--------------------------------------------------------------------------------
+C1. Generate one automation secret.
+    DO     openssl rand -hex 32
+    KEEP   The value in your password manager. Never commit it, never paste it
+           into an issue, never put it in a URL.
+
+C2. Put the SAME value in two places. These two MUST MATCH exactly.
+    DO     Vault (read by pg_cron at run time):
+             select vault.create_secret('<value>', 'auto_publish_secret',
+                                        'NewsSparkle automation');
+           Function environment (checked by _shared/auth.ts on every call):
+             supabase secrets set AUTO_PUBLISH_SECRET=<same value>
+    MUST MATCH: vault `auto_publish_secret`  <->  function AUTO_PUBLISH_SECRET.
+    WHY    pg_cron reads Vault and sends the value in the Authorization header;
+           the functions compare what they receive against the env var. If they
+           differ, every cron call is 401 (fails closed: nothing publishes).
+    OPTIONAL same-value extra: CRON_SECRET (legacy alias still accepted by
+           breaking-news-monitor / notifications-dispatcher / validate-feeds).
+    EXPECT select name from vault.decrypted_secrets
+            where name in ('auto_publish_secret','newsroom_base_url');
+           -> auto_publish_secret present.
+
+C3. Second Vault entry: the base URL (does NOT need to match anything).
+    DO     select vault.create_secret('https://ruusbjlabbojpbawbphc.supabase.co',
+                                      'newsroom_base_url',
+                                      'NewsSparkle automation host');
+    WHY    The trigger builds `<base>/functions/v1/<function>`. If absent it
+           falls back to the hard-coded project URL, so this is a convenience,
+           not a requirement — but set it, so a future project move is a
+           one-row change instead of a migration.
+    EXPECT Both rows from C2/C3 now present.
+
+C4. AI key and site origin in the function environment.
+    DO     supabase secrets set LOVABLE_API_KEY=<AI gateway key>
+           supabase secrets set SITE_URL=https://newssparkle.lovable.app
+    MUST MATCH: SITE_URL should equal the front end's VITE_SITE_URL, or
+           canonical URLs in feeds/JSON-LD will disagree with the site.
+    OPTIONAL   AI_BASE_URL / AI_MODEL (defaults api.openai.com/v1, gpt-4o-mini),
+           OPENAI_API_KEY or AI_API_KEY instead of LOVABLE_API_KEY,
+           AUTO_PUBLISH_URL (only used by breaking-news-monitor),
+           UNSPLASH_ACCESS_KEY / PEXELS_API_KEY (image quality; picsum is the
+           deterministic fallback, and nothing breaks without them).
+    Note about a missing AI key: the desk does NOT invent anything. It records
+    the alert "No AI key configured: the desk cannot write. Publishing is
+    paused, nothing is invented." and stops.
+    NOT NEEDED IN THE FUNCTION ENV: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+           SUPABASE_ANON_KEY — the platform injects these.
+    EXPECT Unauthenticated call to a function returns 401, and an authenticated
+           call does NOT return 500 "Server is not configured with an
+           automation secret."
+    BLOCKED (needs CLI + your key).
+
+C5. Front-end build variables (public by design; never put secrets here).
+    REPO   VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY, VITE_SITE_URL,
+           VITE_DEMO_MODE=false. Set in the host's build environment (.env is
+           gitignored; .env.example documents the names).
+    NOTE   VITE_DEMO_MODE=true serves local fixtures instead of the database —
+           never enable it in a deployed build.
+    BLOCKED (host dashboard).
+
+--------------------------------------------------------------------------------
+SECTION D — DEPLOY AND VERIFY THE FUNCTIONS
+--------------------------------------------------------------------------------
+D1. The 13 edge functions, by exact directory name:
+       auto-publish              breaking-news-monitor     ingest-feeds
+       maintenance               news-sitemap              notifications-dispatcher
+       phase6-monitor            publish-scheduler         rss
+       sitemap                   trend-watch               validate-feeds
+       write-desk
+    (supabase/functions/_shared is a module folder, not a function.)
+
+D2. Optional but recommended pre-flight, offline:
+    DO     npm ci && npm run verify && npm run check:functions
+    EXPECT typecheck + lint + 194 tests + build, then 13/13 entrypoints clean on
+           Deno. `npm run check:functions` self-skips (exit 0) if no deno binary
+           is installed; to force it: npm i -D deno.
+
+D3. Deploy. Supabase takes one command per function or a directory sweep.
+    DO     supabase functions deploy auto-publish breaking-news-monitor \
+             ingest-feeds maintenance news-sitemap notifications-dispatcher \
+             phase6-monitor publish-scheduler rss sitemap trend-watch \
+             validate-feeds write-desk
+           (or simply `supabase functions deploy`, which deploys every folder
+            under supabase/functions/ that has an index.ts)
+    EXPECT 13 deployments reported, no bundling/type error. A 401/403 here
+           means the CLI token lacks project access, not a code problem.
+    BLOCKED (needs CLI + personal access token).
+
+D4. Verify the gateway contract (public endpoints open, automation closed).
+    DO     for f in sitemap news-sitemap rss; do
+             curl -s -o /dev/null -w "$f %{http_code}\n" \
+               "https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/$f"; done
+           curl -s -o /dev/null -w 'ingest-feeds %{http_code}\n' -X POST \
+             "https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/ingest-feeds" -d '{}'
+    EXPECT 200 200 200 and 401.
+    WHY    This is the single most important safety property: a write-capable
+           endpoint that answers 200 without credentials can be triggered by
+           anyone. If it answers 200, stop and fix `verify_jwt` / requireSecret
+           before enabling anything.
+    IF IT FAILS  Do not enable the loop. Re-check supabase/config.toml
+           ([functions.ingest-feeds] verify_jwt = false is correct — the
+           function authenticates itself) and that the deployed revision is the
+           one from this repo.
+    BLOCKED (needs network access to the project).
+
+--------------------------------------------------------------------------------
+SECTION E — CONTROLLED DRY RUN (write exactly one article, by hand)
+--------------------------------------------------------------------------------
+Keep the Section B2 pause in force for all of E.
+
+E1. Ingest candidates (this job is already running on cron; do it by hand too).
+    DO     curl -sS -X POST ".../functions/v1/ingest-feeds" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+             -d '{"maxSources":3}' | jq '{ok, checked: .metrics.sources_checked,
+                                            rejected: .metrics.rejected, deduped: .metrics.deduped}'
+    EXPECT ok:true, checked 3, and a pipeline_runs row written.
+    IF IT FAILS
+       - 401 -> the secret mismatch in C2.
+       - 500 "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required" -> deploy
+         without the platform env; redeploy.
+       - ok:false with feed errors -> blocked/roamed feeds (expected for some
+         publishers from cloud IPs). Check which:
+         select name, consecutive_failures, disabled_until from public.content_sources
+          where consecutive_failures > 0 order by consecutive_failures desc;
+       - Verify candidates arrived:
+         select status, count(*) from public.ingested_items group by status;
+    BLOCKED (live).
+
+E2. Write ONE story.
+    DO     curl -sS -X POST ".../functions/v1/write-desk" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" -d '{"limit":1}' \
+             | jq '{ok, written: .itemsOut, llm: .llmCalls, errors}'
+    EXPECT ok:true, written 1, llm 2-4 (writer + verifier + alt text).
+    EXPECT then:  select slug, status, scheduled_for, quality_score, published_by,
+                         review_reason from public.posts order by created_at desc limit 3;
+                  -> status is 'scheduled' (score >= 75) or 'review' (55-74) or
+                     'rejected' (< 55 or a blocking rule). published_at IS NULL.
+                     published_by = 'automation'.
+    CRITICAL  write-desk cannot make anything public. Verified in code: the only
+              statuses it writes are scheduled / review / rejected
+              (pipeline.ts), and every public surface (RLS policy, every page,
+              the sitemaps, RSS) filters on status='published'.
+    IF IT FAILS
+       - written 0 with note "queue empty": E1 found nothing usable; widen the
+         ingest (more sources) or use a known-good feed.
+       - ok:false and the alert "No AI key configured": C4.
+       - LLM budget already spent: select public.newsroom_llm_calls_today();
+       - A 'review' verdict is a PASS, not a failure — it is the safety lane
+         working. Inspect review_reason before overriding anything.
+    BLOCKED (live; also depends on real model output).
+
+E3. Prove nothing published itself.
+    DO     select count(*) from public.posts
+            where status = 'published' and published_at > now() - interval '15 minutes';
+    EXPECT 0. (Both publishing crons are paused; this catches a pause that did
+           not take effect.)
+    IF IT FAILS  Stop. Re-check B2 and the cron output:
+           select j.jobname, j.active, r.status, r.return_message, r.start_time
+             from cron.job_run_details r join cron.job j using (jobid)
+            order by r.start_time desc limit 10;
+
+E4. Release exactly ONE story (the only publishing action in this checklist).
+    DO     update public.posts set scheduled_for = now() - interval '1 minute'
+            where slug = '<the slug from E2>';
+    WHY    The desk deliberately schedules a story one minimum gap (25 min) or
+           more into the future — measured 55 minutes for the midday edition —
+           so calling the scheduler immediately after E2 correctly returns
+           published: 0. Pull that single row forward instead of waiting.
+    DO     curl -sS -X POST ".../functions/v1/publish-scheduler" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" -d '{"limit":1}' \
+             | jq '{ok, published: .metrics.published, today: .metrics.published_today,
+                    slugs: .metrics.slugs}'
+    EXPECT ok:true, published 1, slugs: ["<slug>"].
+    EXPECT a SECOND identical call returns published 0 (nothing left due), and
+           the article is live at https://newssparkle.lovable.app/post/<slug>
+           (hard-refresh; it is a client-side route).
+    GATES THAT CAN STILL HOLD IT BACK (all intentional):
+           - min-gap 25 min since the last publication -> metrics.deferred > 0.
+           - daily cap 18 or category cap 5 -> the post is re-timed to tomorrow.
+           - burst limit 2 per run.
+           Check: select status, published_at, scheduled_for from public.posts
+                   where slug = '<slug>';
+    IF IT FAILS  Stop the loop (B2), do not "retry until it works". The gates
+           are the safety system; a refusal is information, not an obstacle.
+    ROLLBACK   Un-publish this one article without deleting it:
+                 update public.posts
+                    set status = 'scheduled', published_at = NULL,
+                        scheduled_for = now() + interval '1 day'
+                  where slug = '<slug>';
+               (Nothing else in the dry run needs rolling back: candidates and
+               drafts are inert.)
+    BLOCKED (live).
+
+E5. Monitor.
+    DO     curl -sS -X POST ".../functions/v1/phase6-monitor" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+             | jq '{ok, autonomy, problems: .metrics.problems,
+                    hours_since_publish: .metrics.hours_since_publish}'
+    EXPECT Before the first publication the monitor legitimately reports
+           ok:false with "candidate queue empty and nothing scheduled" (and, for
+           a project with history, possibly "no publication in Nh"). After E4 it
+           should report ok:true, autonomy.level "high" or "medium".
+           Treat ok:false as a signal to read `problems`, never as a stop by
+           itself.
+    BLOCKED (live).
+
+--------------------------------------------------------------------------------
+SECTION F — THE LEGACY ANON JWT (assessment + safe rotation)
+--------------------------------------------------------------------------------
+FINDING (from the file itself, no secret material reproduced):
+    supabase/migrations/20260503120747_10533559-1488-404d-a686-8078a344b3f7.sql
+    embeds a JWT whose public claims are: role=anon, iss=supabase,
+    ref=gjmmnqtfvnjlwzqwzrzu, iat 2026-05-03, exp 2036-05-02. It is used as a
+    Bearer token for a net.http_post to
+    https://gjmmnqtfvnjlwzqwzrzu.supabase.co/functions/v1/auto-publish.
+
+IS ROTATION NECESSARY?  Not for the security of THIS project, but yes for
+hygiene of the other one:
+  - It is an `anon` key, which is public by design (every browser bundle of that
+    project shipped it).
+  - It is scoped to a DIFFERENT project (ref gjmmnqtfvnjlwzqwzrzu). PostgREST /
+    the gateway verify the project's JWT secret, so this token cannot
+    authenticate against ruusbjlabbojpbawbphc at all — it is inert here.
+  - The cron job that used it was superseded by
+    20261015120200_reschedule_auto_publish_18_per_day.sql, and the Phase 6
+    migration unschedules that job name explicitly.
+  - Therefore: NOT a blocker for activation (BLOCKED-as-unnecessary). It is a
+    live credential for the old project if that project still exists, so:
+      - if gjmmnqtfvnjlwzqwzrzu still exists and you do not use it -> delete it
+        (Dashboard -> that project -> Settings -> General -> Delete), which
+        retires the token outright;
+      - if you still use it -> rotate its anon key (below);
+      - either way, do NOT rewrite the migration (applied migrations are
+        history; the token is already in git history).
+
+SAFE ROTATION SEQUENCE — for the CURRENT project (ruusbjlabbojpbawbphc), only if
+you are deliberately rotating (e.g. before handing the project over). Rotating
+the anon key alone does NOT invalidate the service_role key or the JWT secret.
+    DO     1. Dashboard -> Settings -> API -> rotate the anon/publishable key.
+           2. Copy the new value into the FRONT END build env:
+              VITE_SUPABASE_PUBLISHABLE_KEY=<new value>  (host + .env locally)
+           3. Redeploy the front end (the old key keeps working until you do,
+              so there is no downtime if steps are done in this order).
+           4. Verify reads: homepage, a category page, an article page.
+    EXPECT Public pages load; no browser console 401s. Deep links still work.
+    IF IT FAILS  The previous key still works until both the front end is
+           redeployed AND the old key is revoked, so roll back by restoring the
+           old value in the host env and redeploying.
+    AVOID    Rotating the JWT secret (Settings -> API -> JWT secret) unless you
+             are prepared to re-issue every legacy key: it invalidates anon AND
+             service_role legacy keys at once, which breaks the running edge
+             functions until their injected key is refreshed (a redeploy/restart
+             gives them the new one). Do it in a maintenance window, in this
+             order: note the new anon + service_role keys -> update the front-end
+             env -> redeploy the front end -> `supabase functions deploy` (to
+             refresh injected env) -> verify D4 (401 on ingest-feeds, 200 on
+             sitemap) -> verify a manual ingest call returns 200.
+    BLOCKED (needs the dashboard).
+
+--------------------------------------------------------------------------------
+SECTION G — GRADUAL ENABLEMENT
+--------------------------------------------------------------------------------
+G1. DO     update cron.job set active = true
+            where jobname in ('write-desk','publish-scheduler');
+    EXPECT Within an hour: pipeline_runs rows appear every 10/30 minutes, and no
+           more than 18 posts land per UTC day. Verify:
+             select count(*) from public.posts
+              where status='published'
+                and published_at >= date_trunc('day', now() at time zone 'utc');
+             select function, count(*) filter (where ok) ok_runs, max(started_at),
+                    max(error) filter (where not ok)
+               from public.pipeline_runs
+              where started_at > now() - interval '2 hours' group by function;
+    IF IT FAILS  Pause again (B2). Investigate with cron.job_run_details + the
+           function logs; fix forward, re-run E2-E5 before re-enabling.
+
+G2. Wait 24 hours before enabling the editions and the alert pipelines:
+    DO     update cron.job set active = true
+            where jobname in ('auto-publish-morning','auto-publish-midday',
+                              'auto-publish-evening','notifications-dispatcher',
+                              'breaking-news-monitor');
+    WHY    auto-publish runs the whole pipeline unattended (ingest -> write ->
+           publish) and breaking-news-monitor triggers it on a new headline;
+           both are the highest-consequence jobs and deserve the calmest start.
+    EXPECT After the first edition: `wrote` and `published` are both non-zero,
+           and the day stays within the caps.
+
+G3. Then set up the outside alarm an operator actually gets: an uptime monitor
+    POSTing to phase6-monitor every 30 minutes with the secret, alerting when
+    the response is not 200 or .ok is false.
+
+--------------------------------------------------------------------------------
+SECTION H — EMERGENCY STOP AND ROLLBACK REFERENCE
+--------------------------------------------------------------------------------
+  -- stop all writing/publishing, keep data
+  update cron.job set active = false
+   where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
+                     'auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor');
+  -- stop everything (ingest + monitoring too) — reversible, deletes nothing
+  update cron.job set active = false;
+  -- resume everything
+  update cron.job set active = true;
+  -- stop one feed
+  update public.content_sources set active = false where name = '<feed>';
+  -- un-publish one article without deleting it (see E4 for the exact form)
+  -- take one article out of the index entirely (kept in the table)
+  update public.posts set status = 'archived', archived_at = now() where slug = '<slug>';
+
+  Nothing in Phase 6 deletes posts. The only automatic deletions are retention
+  prunes, all of which exclude published content:
+    candidates expired > 7d, pipeline_runs > 30d, content_health_checks > 30d,
+    resolved alerts > 60d, topic_trends expired > 7d, post_view_events > 90d.
+
+--------------------------------------------------------------------------------
+SECTION I — DELIBERATE GAPS (do not read these as PASS)
+--------------------------------------------------------------------------------
+1. CI does not run the Deno function check (docs/ci-workflow.pending.yml). Two
+   consequences: the file still has to be committed by a token with the
+   `workflows` scope, and until that step is added CI cannot catch a
+   browser-global bug in an edge function (the class of defect that silently
+   disabled breaking-news-monitor). Verified command to add:
+     npm i -D deno && npm run check:functions
+2. pg_cron actually firing is not verified here and cannot be: it needs the live
+   platform. The migration's job definitions are verified; the clock is not.
+3. Feed reachability from Supabase's network, real model quality, and Google's
+   indexing of the refreshed sitemaps are all live-only.
+4. `phase6-monitor` returns 207 (not 200) whenever it lists problems, by design;
+   a monitoring tool must treat 207-with-ok:false as an alert, not as "HTTP ok".
+5. The repo has no automated test for the maintenance archive threshold against
+   real data — B3 is a manual gate for that reason.
