@@ -161,6 +161,17 @@ window in which publishing or archiving starts before preflight, and no manual
 pause can be missed. `cron.schedule` on its own cannot create an inactive job —
 its three-argument form passes NULL `active`, which pg_cron reads as `true`.
 
+Version note — the two cases are different. `cron.schedule_in_database` exists
+from pg_cron 1.4, so a **fresh install** needs 1.4+ (Supabase ships 1.6.x) or
+that migration fails and `db push` stops there; migration `20261016090200`
+cannot rescue it (it only updates rows that already exist, and on a fresh
+install there are none). An **existing project** whose Phase 6 cron migration
+was already applied needs no such function: the repair migration and the gate
+`UPDATE` just flip `active` on rows that already exist, which needs only the
+`cron.job` table and its `jobname` column (pg_cron 1.3+). Check
+`select extversion from pg_extension where extname = 'pg_cron';` before the
+first push.
+
 Re-applying the migration set stays safe too: the schedule upsert
 (`on conflict on constraint jobname_username_uniq do update`) rewrites
 `schedule`, `command` and `database` **only** — never `active` — and the gate
@@ -232,7 +243,9 @@ supabase db push
 #         false and ingest-feeds / trend-watch / phase6-monitor /
 #         validate-feeds-daily / prune-post-view-events / prune-automation true.
 #    If the count is not 8/6, stop: migration 20261016090200 closes the gate
-#    again on any project (re-runnable, changes nothing else).
+#    again on any project that already has the jobs (re-runnable, changes
+#    nothing else). It never creates a job, so it is not a fix for a fresh
+#    install that failed on an unsupported pg_cron - see the note above.
 
 # 2. Secrets — the same value in Vault and in the function environment.
 openssl rand -hex 32

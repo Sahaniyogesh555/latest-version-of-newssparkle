@@ -76,7 +76,7 @@ describe("migration chain", () => {
   it("keeps the Phase 6 migrations idempotent when re-applied", async () => {
     // Supabase records applied migrations, so this is belt-and-braces: a
     // re-run (or a partially applied migration) must not fail or duplicate data.
-    for (const file of [PHASE6_SCHEMA, PHASE6_CRONS]) {
+    for (const file of [PHASE6_SCHEMA, PHASE6_CRONS, PHASE6_GATE]) {
       const { sql } = prepareMigrationSql(readMigration(file));
       await expect(staging.db.exec(sql)).resolves.not.toThrow();
     }
@@ -85,6 +85,10 @@ describe("migration chain", () => {
     expect(sources).toBe(24); // seeded once, `on conflict do nothing` kept it at 24
     const jobs = await scalar<number>(staging.db, "select count(*)::int from cron.job");
     expect(jobs).toBe(ALL_JOBS.length);
+    // The repair migration re-applies as a no-op: it only updates existing rows,
+    // so the gate stays closed and nothing new is scheduled.
+    const active = await scalar<number>(staging.db, "select count(*)::int from cron.job where active");
+    expect(active).toBe(SAFE_JOB_NAMES.length);
   });
 });
 

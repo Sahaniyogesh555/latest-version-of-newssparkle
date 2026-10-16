@@ -51,6 +51,9 @@ function walk(dir: string, exts: string[]): string[] {
 
 const sourceFiles = [...walk("src", [".ts", ".tsx"]), "index.html"];
 
+/** Operator-facing docs asserted against the repository in several places. */
+const OPERATIONS = "docs/OPERATIONS.md";
+
 describe("referenced assets exist", () => {
   const assetPattern = /["'`(](\/[A-Za-z0-9._@/-]+\.(?:png|jpg|jpeg|svg|webp|ico|json|xml|txt))["'`) ]/g;
 
@@ -220,7 +223,6 @@ describe("the Phase 6 cron gate is one statement in four places", () => {
   const MIGRATION = "supabase/migrations/20261016090100_phase6_autonomy_crons.sql";
   const REPAIR = "supabase/migrations/20261016090200_phase6_activation_gate.sql";
   const CHECKLIST = "phase6_activation_checklist.txt";
-  const OPERATIONS = "docs/OPERATIONS.md";
   const gate = normaliseSql(GATE_SQL);
 
   it("embeds the identical gate statement in the migration, the repair migration, the checklist and OPERATIONS.md", () => {
@@ -286,6 +288,82 @@ describe("the Phase 6 cron gate is one statement in four places", () => {
     for (const file of [CHECKLIST, OPERATIONS]) {
       const text = read(file);
       for (const phrase of retired) expect(text, file).not.toContain(phrase);
+    }
+  });
+});
+
+describe("the documented migration count matches the repository", () => {
+  const MIGRATIONS = "supabase/migrations";
+  const CHECKLIST = "phase6_activation_checklist.txt";
+  const SUMMARY = "phase6_1_summary.txt";
+
+  const migrationCount = readdirSync(join(root, MIGRATIONS)).filter((name) =>
+    name.endsWith(".sql"),
+  ).length;
+
+  it("counts the migration files the operator documents promise", () => {
+    // Sanity: the glob found the real chain, not an empty directory.
+    expect(migrationCount).toBeGreaterThanOrEqual(13);
+
+    const checklist = read(CHECKLIST);
+    const applyLine = checklist.match(/All (\d+) migrations apply in filename order/);
+    expect(applyLine?.[1], "phase6_activation_checklist.txt section 0").toBe(String(migrationCount));
+    const pushLine = checklist.match(/EXPECT (\d+) migrations applied/);
+    expect(pushLine?.[1], "phase6_activation_checklist.txt B1").toBe(String(migrationCount));
+
+    const summary = read(SUMMARY);
+    const pushTargets = [...summary.matchAll(/-> (\d+) migrations/g)].map((m) => m[1]);
+    expect(pushTargets.length, "phase6_1_summary.txt db push expectation").toBeGreaterThan(0);
+    expect(pushTargets).toEqual(pushTargets.map(() => String(migrationCount)));
+    const statusLine = summary.match(/functions and\s+(\d+)\/(\d+) migrations/);
+    expect(statusLine?.slice(1), "phase6_1_summary.txt final status").toEqual([
+      String(migrationCount),
+      String(migrationCount),
+    ]);
+  });
+
+  it("retires the pre-correction migration counts", () => {
+    for (const file of [CHECKLIST, SUMMARY]) {
+      const text = read(file);
+      expect(text, file).not.toMatch(/\b12 migrations\b/);
+      expect(text, file).not.toMatch(/\b12\/12\b/);
+    }
+  });
+
+  it("keeps 6.1-era numbers in the summary labelled as historical", () => {
+    const summary = read(SUMMARY);
+    expect(summary).toContain("THIS SECTION IS PRE-CORRECTION EVIDENCE");
+    // The old chain size is still recorded (it was measured), but only ever
+    // within a paragraph that marks it as historical.
+    const mentions: string[] = [];
+    for (let at = summary.indexOf("1087 lines"); at !== -1; at = summary.indexOf("1087 lines", at + 1)) {
+      mentions.push(summary.slice(Math.max(0, at - 320), at + 320));
+    }
+    expect(mentions.length).toBeGreaterThan(0);
+    for (const context of mentions) expect(context).toMatch(/historical/i);
+  });
+
+  it("splits the pg_cron version requirement across the two installation cases", () => {
+    // The repair migration must only touch existing rows: no schedule_in_database,
+    // and nothing that switches a job on.
+    const repair = read("supabase/migrations/20261016090200_phase6_activation_gate.sql");
+    expect(repair).not.toContain("schedule_in_database");
+    expect(repair).not.toMatch(/set active\s*=\s*true/i);
+
+    // ...while the primary migration is the one that needs pg_cron 1.4+.
+    expect(read("supabase/migrations/20261016090100_phase6_autonomy_crons.sql")).toContain(
+      "schedule_in_database",
+    );
+
+    // All three operator documents must state both cases and the version floor.
+    for (const file of [CHECKLIST, SUMMARY, OPERATIONS]) {
+      const text = read(file);
+      expect(text, file).toMatch(/fresh install/i);
+      expect(text, file).toMatch(/existing project/i);
+      expect(text, file).toMatch(/1\.4/);
+      // The claim that must not come back: the repair migration fixing every
+      // installation regardless of version.
+      expect(text, file).not.toMatch(/repair (migration|path)[^.]*\bregardless\b/i);
     }
   });
 });

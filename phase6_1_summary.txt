@@ -82,6 +82,11 @@ OPERATOR ACTIVATION (the only way jobs switch on): three documented steps, in
   the checklist file and runs them, so the doc and the tested behaviour cannot
   drift apart.
 
+MIGRATION COUNT AFTER THIS CORRECTION: 13 files in supabase/migrations/
+(20261016090200_phase6_activation_gate.sql is new here; the 6.1 audit above ran
+against 12). Verified by the suite: it applies every file it finds and asserts
+the number of runs equals the number of files.
+
 FILES CHANGED IN THIS CORRECTION
 --------------------------------
 supabase/migrations/20261016090100_phase6_autonomy_crons.sql  (patched)
@@ -127,22 +132,76 @@ docs/OPERATIONS.md  (section 3 + activation block)
    explanation, the canonical gate SQL in Pause and resume, and G3 as a
    separate maintenance approval.
 
+DOC-ONLY CORRECTION (migration count + pg_cron version caveat)
+--------------------------------------------------------------
+A follow-up documentation correction on the same branch, still no deployment.
+It changes no behaviour, and every number below was re-measured at this commit.
+
+1. MIGRATION COUNT was stale in five places. supabase/migrations/ holds 13 .sql
+   files here - the 6.1 audit above ran against the 12-file chain, and the
+   correction section added 20261016090200_phase6_activation_gate.sql.
+   Corrected:
+     phase6_activation_checklist.txt section 0 ("all migrations apply...") and
+       step B1 ("EXPECT ... migrations applied") now state the current count;
+     phase6_1_summary.txt section 2 (the live db push expectation) and the
+       final status line now state the current count.
+   Kept accurate and relabelled: the 6.1 evidence (12 files / 1087 lines, 14
+   tests) is marked PRE-CORRECTION / historical, because migration
+   20261016090200 did not exist in that run and no earlier result covers it.
+   The current numbers live in the correction section above and in the
+   checklist's section 0.
+2. pg_cron VERSION CAVEAT was overstated. The old text implied the repair
+   migration closes the gate for every installation regardless of version. The
+   two cases are now separated everywhere (checklist A2/B1/B2, OPERATIONS.md
+   section 3):
+     EXISTING project whose cron migration was already applied: the jobs exist,
+       so the repair migration and the gate UPDATE only flip `active` on rows
+       that already exist. Thin requirement: the cron.job table and its
+       `jobname` column (pg_cron 1.3+), which such a project already has,
+       because the jobs being gated were created through it.
+     FRESH INSTALL: migration 20261016090100 itself calls
+       cron.schedule_in_database (pg_cron 1.4+, 2021; Supabase ships 1.6.x). On
+       an older version that statement does not exist, `db push` fails there and
+       the repair migration never runs - it cannot rescue that case, and it
+       creates no rows. Remedy: have pg_cron >= 1.4 before the first push. The
+       checklist now makes the operator assert `select count(*) from cron.job;`
+       (expect 14) after B1 instead of assuming.
+3. INTEGRITY TESTS added (repo-integrity.test.ts), following the file's
+   existing read-from-disk convention:
+     - the migration count the docs promise equals the number of .sql files in
+       supabase/migrations/ (checklist section 0 + B1, summary db push + final
+       status), so a new migration cannot land with stale docs;
+     - the retired count claims are banned from both documents;
+     - the historical 6.1 figures must sit inside a paragraph marked historical;
+     - the repair migration contains no schedule_in_database and no
+       `set active = true` (it only updates existing rows), while the primary
+       migration does use schedule_in_database - the structural half of the
+       version split;
+     - all three operator documents state both installation cases and the 1.4
+       floor.
+   phase6-sql.test.ts: the idempotency test now re-applies all three Phase 6
+   migrations (it re-applied two) and asserts the gate stays at 6 active.
+   Mutation check: reverting B1 to the old figure fails 2 of the new tests.
+
 EVIDENCE - COMMANDS RUN (all local, all offline)
 ------------------------------------------------
 npx vitest run src/test/phase6-sql.test.ts        -> 19 passed / 0 failed
 npx vitest run src/test/repo-integrity.test.ts    -> 23 passed / 0 failed
 npx vitest run src/test/phase6-orchestration.test.ts -> 31 passed (unchanged)
 npx vitest run src/test/phase6-secrets.test.ts    -> 10 passed (unchanged)
-npm run verify   (lint + tsc + vitest + build)    -> exit 0; 12 files / 203
-                                                     tests passed (194 before
-                                                     this correction, +9)
+npm run verify   (lint + tsc + vitest + build)    -> exit 0; 12 test files /
+                                                     207 tests passed (194
+                                                     before the corrections)
 npm run check:functions                           -> exit 0; 13/13 entrypoints
                                                      type-check, deno 2.9.6
 Mutation checks (deliberate drift, then reverted) -> deleting
   'newsroom-maintenance' from the OPERATIONS.md gate statement fails 2
   repo-integrity tests; changing the checklist G1 statement to name only
-  write-desk fails the phase6-sql checklist-parity test. The guards have
-  teeth, they are not tautologies.
+  write-desk fails the phase6-sql checklist-parity test; reverting the
+  checklist B1 count back to the old figure fails 2 of the count tests. The
+  guards
+  have teeth, they are not tautologies. All counts above were re-measured at
+  this commit, after the doc correction, in one final `npm run verify`.
 Staging-harness probe (PGlite, real PostgreSQL 18.6): schedule_in_database
   with active := false inserts active=false; re-scheduling the same job name
   updates schedule and leaves active untouched; the operator gate then flips
@@ -154,11 +213,31 @@ NOT VERIFIED  The live project's cron.job table. Network egress to
               *.supabase.co is unavailable in this environment and no
               Supabase credential exists, so the current state of the live
               pg_cron jobs is unknown - BLOCKED, not "fine".
-NOT VERIFIED  That the deployed pg_cron is >= 1.4. The migration now needs
-              schedule_in_database; pg_cron has shipped it since 1.4 (2021)
-              and Supabase ships 1.6.x, but the live extversion was not read.
-              Migration 20261016090200 is the repair path if an older one is
-              found: it closes the gate on such a project regardless.
+NOT VERIFIED  The deployed pg_cron version (extversion was never read: no
+              egress to *.supabase.co, no credentials). The correction makes it
+              load-bearing in two DIFFERENT ways that must not be conflated:
+              (a) EXISTING PROJECT whose cron migration was already applied:
+                  the jobs exist, so the repair migration 20261016090200 closes
+                  the gate with a plain `update cron.job set active = false
+                  where jobname in (...)`. No schedule_in_database is involved:
+                  it needs only the cron.job table and its jobname column
+                  (pg_cron 1.3+), which such a project already has, because the
+                  jobs being gated were created through it. This path is
+                  version-robust.
+              (b) FRESH INSTALL: the cron migration 20261016090100 creates the
+                  eight gated jobs with cron.schedule_in_database(..., active :=
+                  false), which exists from pg_cron 1.4 (2021; Supabase ships
+                  1.6.x today). On an older pg_cron that statement does not
+                  exist and `db push` FAILS there. The repair migration cannot
+                  rescue this case: it never runs (the push stops at the
+                  failing migration) and it creates no rows. The remedy is to
+                  make pg_cron >= 1.4 available before the first push, not to
+                  hand-create jobs.
+              Fail-closed reading of (b): a fresh install on an older pg_cron
+              ends with 0 Phase 6 cron jobs - nothing publishes (safe), but
+              ingestion, trends and the monitor are not running either, so it
+              needs the operator to notice. The checklist makes that an explicit
+              check (`select count(*) from cron.job;` expect 14 after B1).
 NOT VERIFIED  pg_cron's clock and the statement-level trigger firing in
               production: the harness reproduces the schema and the upsert
               semantics, not the scheduler thread.
@@ -191,16 +270,26 @@ whether Phase 6 works were executed with real engines:
     V8 15.0.245.2 / TypeScript 6.0.3) - the runtime Supabase uses.
     `npm run check:functions` (scripts/check-functions.mjs, 13 entrypoints).
 
-1. PASS - VERIFIED HERE
+1. PASS - VERIFIED HERE  (historical: measured during the 6.1 audit at 9cd5cc0)
 -----------------------
+THIS SECTION IS PRE-CORRECTION EVIDENCE. It was measured before the fail-closed
+cron-gate correction (commit 822d9d7) and is left exactly as measured; it must
+not be read as covering that correction. The two numbers that changed: the
+migration chain is 13 files now, not 12, and src/test/phase6-sql.test.ts holds
+19 tests, not 14. The current, re-verified numbers are in the correction section
+at the top of this file and in phase6_activation_checklist.txt section 0.
 PASS  Migration chain applies cleanly: 12 files / 1087 lines, no errors.
+      (historical - the chain is 13 files since 20261016090200 was added; that
+      13-file chain was verified separately, see the correction section.)
       Only 3 statements were substituted - the `create extension if not exists`
       lines for pg_cron + pg_net (20260503120214_...) and pgcrypto
       (20261016090000_phase6_autonomy_schema.sql). Everything else ran as
       written, including the older
       `alter publication supabase_realtime add table public.notifications`.
-PASS  Phase 6 migrations are re-runnable: re-applying both keeps 24 sources,
-      14 jobs, no duplicate rows, no errors.
+PASS  Phase 6 migrations are re-runnable: re-applying them keeps 24 sources,
+      14 jobs, no duplicate rows, no errors. (historical: two files at the time
+      of that run; all three Phase 6 migrations are re-applied and asserted
+      today.)
 PASS  Schema: 6 automation tables, all 17 new posts columns, all 13 indexes;
       posts status accepts draft/review/scheduled/published/rejected/archived
       and rejects anything else; ingested fingerprints are unique; record_alert
@@ -247,7 +336,7 @@ PASS  Limits are the documented ones: 18 posts/UTC day, 5 per section, 25-min
       5+6+7=18, publish >=75 / review >=55, duplicate thresholds
       0.72/0.55/0.38/0.2, LLM budget 220 calls/day checked before the desk
       spends.
-PASS  Pipeline behaviour offline (fake DB/AI/HTTP): 192 tests / 12 files pass.
+PASS  Pipeline behaviour offline (fake DB/AI/HTTP): 192 tests / 12 test files pass.
       All six orchestrators are covered end to end - ingest (validation,
       dedupe, corroboration, source health, cooldown, garbage feeds), write
       desk (write -> verify -> score -> schedule/review/reject, unparseable
@@ -262,7 +351,12 @@ PASS  Pipeline behaviour offline (fake DB/AI/HTTP): 192 tests / 12 files pass.
 Each item names the command and the expected result, so it is a checklist.
 
 BLOCKED  Apply migrations: `supabase link --project-ref ruusbjlabbojpbawbphc`
-         + `supabase db push` -> 12 migrations, 0 errors. Then
+         + `supabase db push` -> 13 migrations, 0 errors (the repository holds
+         13 .sql files in supabase/migrations/; 20261016090200 is a no-op on a
+         fresh install). On a FRESH install the cron migration needs
+         cron.schedule_in_database -> pg_cron >= 1.4 available first; the repair
+         migration does not substitute for that (see the version caveat below).
+         Then
          `select jobname, schedule, active from cron.job order by 1;`
          -> 14 rows: 8 inactive (write-desk, publish-scheduler,
          auto-publish-*, breaking-news-monitor, notifications-dispatcher,
@@ -404,7 +498,7 @@ re-enabled. See section H of phase6_activation_checklist.txt.
 14 resource efficiency ...................... PASS (estimates; real spend NOT
                                               TESTED until live)
 15 final verification of every subsystem .... PASS for 13/13 functions and
-                                              12/12 migrations; 6 live items
+                                              13/13 migrations; 6 live items
                                               BLOCKED
 16 phase6_summary.txt ....................... PASS (already delivered)
    deploy the 7 functions ................... BLOCKED (no CLI credentials/egress)

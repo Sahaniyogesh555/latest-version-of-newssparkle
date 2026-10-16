@@ -13,11 +13,16 @@ IF IT FAILS (the stop/rollback action). Do not continue past a failed step.
 --------------------------------------------------------------------------------
 SECTION 0 — WHAT IS ALREADY VERIFIED (do not redo)
 --------------------------------------------------------------------------------
-PASS  All 12 migrations apply in filename order against real PostgreSQL 18.6,
+PASS  All 13 migrations apply in filename order against real PostgreSQL 18.6,
       with only the pg_cron/pg_net/pgcrypto `create extension` lines stubbed.
-      src/test/phase6-sql.test.ts (15 tests).
-PASS  Both Phase 6 migrations are re-runnable (idempotent): 24 sources stay 24,
-      14 cron jobs stay 14.
+      src/test/phase6-sql.test.ts (19 tests, run at the fail-closed correction
+      commit 822d9d7 with this document's counts).
+      HISTORICAL: the same chain passed with 12 files at the 6.1 audit commit
+      (9cd5cc0). Migration 20261016090200 did not exist in that run, so no
+      earlier result covers it - only the run named above does.
+PASS  All three Phase 6 migrations are re-runnable (idempotent): re-applying
+      them keeps 24 sources at 24 and 14 cron jobs at 14, and leaves the gate
+      at 8 inactive / 6 active.
 PASS  RLS/privileges: anon + authenticated hold no SELECT/INSERT on any
       automation table; posts keeps its published-only read policy.
 PASS  The 7 service-role RPCs are SECURITY DEFINER with a pinned search_path.
@@ -55,10 +60,29 @@ A2. Record the "before" state so you can prove what changed.
     EXPECT Before step B1 the cron query errors (relation cron.job missing) —
            that is normal on a project that has never run Phase 6. After B1 you
            must see exactly 14 rows, and the two counts below must be 8 and 6.
-    NOTE   Record extversion (expect 1.4+, typically 1.6.x). Nothing in this
-           checklist depends on that version except the two optional API forms
-           cron.schedule_in_database(..., active := false) (the migration uses
-           it, 1.4+) and cron.alter_job (the owner-only alternative).
+    NOTE   Record extversion. It matters in TWO DIFFERENT CASES, and they must
+           not be conflated:
+             (a) EXISTING project whose Phase 6 cron migration was already
+                 applied: the jobs exist, and the repair migration
+                 20261016090200 (plus B2) closes the gate with a plain
+                 `update cron.job ...`. That path needs no
+                 cron.schedule_in_database - only the cron.job table and its
+                 `jobname` column (pg_cron 1.3+), which such a project already
+                 has, because the jobs being gated were created through it.
+                 Works on any version that could have created them.
+             (b) FRESH INSTALL (no Phase 6 jobs yet): the cron migration
+                 20261016090100 creates the eight gated jobs with
+                 cron.schedule_in_database(..., active := false). That function
+                 exists from pg_cron 1.4 (2021; expect 1.6.x here). If the
+                 project's pg_cron is older, the migration FAILS at that
+                 statement - the repair migration does NOT rescue this case,
+                 because `db push` stops before it runs and there are no rows
+                 for it to update. Verify BEFORE the first push:
+                   select extversion from pg_extension where extname = 'pg_cron';
+                 If it is < 1.4, update the extension (or the platform plan) so
+                 the version is available first; do not hand-create the jobs.
+           cron.alter_job(jobid, active := false) (1.4+, REVOKEd from public,
+           owner role only) stays an optional alternative to the UPDATE forms.
     BLOCKED (needs dashboard/SQL editor).
 
 --------------------------------------------------------------------------------
@@ -67,7 +91,10 @@ SECTION B — APPLY MIGRATIONS AND PAUSE, IN THIS ORDER
 B1. Apply the migrations.
     DO     supabase link --project-ref ruusbjlabbojpbawbphc
            supabase db push
-    EXPECT 12 migrations applied, 0 errors. The Phase 6 cron migration creates
+    EXPECT 13 migrations applied, 0 errors (the last one,
+           20261016090200_phase6_activation_gate.sql, is a no-op on a fresh
+           install: 20261016090100 already created the gate set inactive).
+           The Phase 6 cron migration creates
            the eight jobs that can publish, queue with LLM budget, alert readers
            or archive published content INACTIVE (cron.schedule_in_database
            with active := false), so no such job can run before you finish this
@@ -76,6 +103,16 @@ B1. Apply the migrations.
     IF IT FAILS
            - Error on an already-applied migration: nothing to do, it is
              recorded in supabase_migrations.schema_migrations.
+           - `function cron.schedule_in_database(...) does not exist`: a FRESH
+             install on a pg_cron older than 1.4 (see the A2 note). The repair
+             migration cannot fix this - it only updates rows that already
+             exist. Get pg_cron 1.4+ available, then re-run the push. Assert
+             the real state first, do not assume:
+               select extversion from pg_extension where extname = 'pg_cron';
+               select count(*) from cron.job;   -- expected 14 after a clean B1
+             If that count is 0, the fail-closed reading is: nothing is
+             publishing, and nothing is ingesting or monitoring either. Safe,
+             but not self-healing - fix the version and push again.
            - Error inside 20261016090000_phase6_autonomy_schema.sql: stop, do
              not retry blindly. That file is idempotent (create if not exists,
              add column if not exists), and the failing statement is reported
@@ -90,9 +127,11 @@ B1. Apply the migrations.
 
 B2. Verify the gate — and close it if this project applied an older revision.
     The migration already closed it, so this step is a verification plus an
-    idempotent repair (a running statement, not a promise): if the project was
-    migrated before the fail-closed change, its jobs exist ACTIVE and this is
-    what closes them.
+    idempotent repair (a running statement, not a promise). It serves the
+    EXISTING-project case: if the project was migrated before the fail-closed
+    change, its jobs exist ACTIVE and this is what closes them. It does nothing
+    for the fresh-install case, where the version requirement sits in the cron
+    migration itself (see A2 note (b) and B1).
     DO     update cron.job set active = false
             where jobname in ('write-desk','publish-scheduler',
                               'auto-publish-morning','auto-publish-midday','auto-publish-evening',
