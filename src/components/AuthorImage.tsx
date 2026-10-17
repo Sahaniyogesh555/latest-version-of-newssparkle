@@ -32,8 +32,10 @@ export function AuthorImage({
                    author.imageMd ||
                    author.image;
 
+  // The picture is the flex item; shrink-0 on its img cannot protect it.
   return (
     <OptimizedImage
+      pictureClassName="inline-flex shrink-0"
       src={imageUrl as string}
       alt={`${author.name} avatar`}
       width={config.px}

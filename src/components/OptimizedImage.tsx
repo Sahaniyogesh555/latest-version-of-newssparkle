@@ -3,6 +3,8 @@ import type { ImgHTMLAttributes } from "react";
 type OptimizedImageProps = ImgHTMLAttributes<HTMLImageElement> & {
   priority?: boolean;
   aspectRatio?: string;
+  /** Layout classes belong on the <picture> when it is a flex/grid item. */
+  pictureClassName?: string;
   /**
    * Force (true) or suppress (false) the `.webp` <source>.
    *
@@ -29,6 +31,7 @@ export function OptimizedImage({
   decoding = "async",
   priority = false,
   aspectRatio,
+  pictureClassName,
   webp,
   style,
   ...rest
@@ -43,7 +46,7 @@ export function OptimizedImage({
   const combinedClassName = [className, aspectClass].filter(Boolean).join(' ');
 
   return (
-    <picture>
+    <picture className={pictureClassName}>
       {webpSource && <source type="image/webp" srcSet={webpSource} />}
       <img
         src={source}
