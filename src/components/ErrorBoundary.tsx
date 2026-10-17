@@ -39,7 +39,7 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.props.fallback) return this.props.fallback(error, this.reset);
 
     return (
-      <div className="min-h-screen flex items-center justify-center px-6">
+      <main className="min-h-screen flex items-center justify-center px-6">
         <div className="max-w-lg w-full card-base p-8 text-center">
           <div className="flex justify-center mb-5">
             <div className="p-3 bg-primary/10 rounded-full">
@@ -49,8 +49,8 @@ export class ErrorBoundary extends Component<Props, State> {
           <div className="kicker text-primary mb-3">Something went wrong</div>
           <h1 className="headline-lg mb-3">This story hit a snag</h1>
           <p className="text-foreground/70 leading-relaxed mb-6">
-            We could not load this page. It has been logged and the newsroom has been notified —
-            please try again, or head back to the front page.
+            We could not load this page. Please try again, or head back to the front page.
+            If the problem continues, you can report it through our contact page.
           </p>
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <button
@@ -78,7 +78,7 @@ export class ErrorBoundary extends Component<Props, State> {
             </pre>
           )}
         </div>
-      </div>
+      </main>
     );
   }
 }

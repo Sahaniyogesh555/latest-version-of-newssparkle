@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { readStorage, writeStorage } from "@/lib/storage";
 
 const STORAGE_KEY = "ns-cookie-consent";
 
@@ -9,16 +10,16 @@ export function CookieConsent() {
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
-    const existing = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
-    if (!existing) setVisible(true);
+    try {
+      const existing = JSON.parse(readStorage(STORAGE_KEY) || "null");
+      setVisible(existing?.choice !== "accepted" && existing?.choice !== "rejected");
+    } catch {
+      setVisible(true);
+    }
   }, []);
 
   const decide = (choice: Choice) => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ choice, ts: new Date().toISOString() }));
-    } catch {
-      // ignore quota errors
-    }
+    writeStorage(STORAGE_KEY, JSON.stringify({ choice, ts: new Date().toISOString() }));
     setVisible(false);
     // Signal to ad/analytics scripts that consent state changed
     window.dispatchEvent(new CustomEvent("ns:consent", { detail: { choice } }));

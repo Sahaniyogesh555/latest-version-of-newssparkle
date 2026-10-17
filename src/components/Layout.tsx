@@ -20,7 +20,7 @@ export function Layout({ children }: { children: ReactNode }) {
     sameAs: [`https://twitter.com/${SITE.twitter.replace(/^@/, "")}`],
   };
   return (
-    <div className="min-h-screen flex flex-col bg-background">
+    <div className="min-h-screen flex flex-col bg-background pb-[calc(6rem_+_env(safe-area-inset-bottom))] md:pb-0">
       <Helmet>
         <script type="application/ld+json">{JSON.stringify(orgLd)}</script>
       </Helmet>
@@ -32,7 +32,7 @@ export function Layout({ children }: { children: ReactNode }) {
       </a>
       <DemoModeBanner />
       <Header />
-      <main id="main-content" className="flex-1 pb-16 md:pb-0">{children}</main>
+      <main id="main-content" tabIndex={-1} className="flex-1 min-w-0 focus:outline-none">{children}</main>
       <Footer />
       <MobileBottomNav />
       <CookieConsent />

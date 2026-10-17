@@ -81,7 +81,7 @@ export function SEO({
     },
     potentialAction: {
       "@type": "SearchAction",
-      target: `${SITE.url}/?s={search_term_string}`,
+      target: `${SITE.url}/search?q={search_term_string}`,
       "query-input": "required name=search_term_string",
     },
   };
@@ -124,7 +124,6 @@ export function SEO({
       <meta name="twitter:description" content={description} />
       <meta name="twitter:image" content={ogImage} />
       <link rel="manifest" href="/manifest.json" />
-      <meta name="theme-color" content="#000000" />
       <link rel="alternate" hrefLang="x-default" href={url} />
       {alternateLinks.map((link) => (
         <link key={link.code} rel="alternate" hrefLang={link.code} href={link.href} />

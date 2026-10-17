@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
@@ -8,10 +8,11 @@ import { PostCard } from "@/components/PostCard";
 import { Post } from "@/lib/types";
 import { AUTHORS } from "@/lib/authors";
 import { X } from "lucide-react";
+import { CATEGORIES } from "@/lib/site";
+import { LoadError } from "@/components/LoadError";
+import { DATE_RANGES, SORT_ORDERS, isCalendarDate, postSearchFilter, searchDateBounds, type DateRange, type SortBy } from "@/lib/search";
 
 type Category = { slug: string; name: string };
-type DateRange = "any" | "24h" | "7d" | "30d" | "year" | "custom";
-type SortBy = "newest" | "oldest" | "popular";
 
 const RANGE_LABELS: Record<DateRange, string> = {
   any: "Any time",
@@ -22,30 +23,20 @@ const RANGE_LABELS: Record<DateRange, string> = {
   custom: "Custom range",
 };
 
-function rangeToFromDate(r: DateRange): string | null {
-  const now = Date.now();
-  const day = 86_400_000;
-  switch (r) {
-    case "24h": return new Date(now - day).toISOString();
-    case "7d": return new Date(now - 7 * day).toISOString();
-    case "30d": return new Date(now - 30 * day).toISOString();
-    case "year": return new Date(now - 365 * day).toISOString();
-    default: return null;
-  }
-}
-
 export default function Search() {
   const [params, setParams] = useSearchParams();
-  const q = params.get("q") || "";
+  const q = (params.get("q") || "").trim();
   const category = params.get("category") || "all";
-  const range = (params.get("range") as DateRange) || "any";
+  const rawRange = params.get("range") as DateRange;
+  const range = DATE_RANGES.includes(rawRange) ? rawRange : "any";
   const fromDate = params.get("from") || "";
   const toDate = params.get("to") || "";
-  const sort = (params.get("sort") as SortBy) || "newest";
+  const rawSort = params.get("sort") as SortBy;
+  const sort = SORT_ORDERS.includes(rawSort) ? rawSort : "newest";
   const author = params.get("author") || "all";
   const tagsParam = params.get("tags") || "";
   const selectedTags = useMemo(
-    () => tagsParam.split(",").map(t => t.trim()).filter(Boolean),
+    () => Array.from(new Set(tagsParam.split(",").map(t => t.trim().toLowerCase()).filter(Boolean))),
     [tagsParam],
   );
 
@@ -53,62 +44,75 @@ export default function Search() {
   const [tagInput, setTagInput] = useState("");
   const [results, setResults] = useState<Post[]>([]);
   const [loading, setLoading] = useState(false);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [authors, setAuthors] = useState<string[]>([]);
+  const [categories, setCategories] = useState<Category[]>([...CATEGORIES]);
+  const [authors, setAuthors] = useState<string[]>(AUTHORS.map(a => a.name));
+  const [error, setError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const inputId = useId();
+  const tagId = useId();
+  const bounds = useMemo(() => searchDateBounds(range, fromDate, toDate), [range, fromDate, toDate]);
+  const hasCriteria = Boolean(q || category !== "all" || range !== "any" || author !== "all" || selectedTags.length || sort !== "newest");
 
   useEffect(() => { setInput(q); }, [q]);
 
   useEffect(() => {
-    supabase.from("categories").select("slug,name").order("name")
-      .then(({ data }) => setCategories((data as Category[]) || []));
-
-    supabase.from("posts").select("author").eq("status", "published").limit(1000)
-      .then(({ data }) => {
-        const set = new Set<string>();
-        (data as { author: string }[] | null)?.forEach(r => r.author && set.add(r.author));
-        AUTHORS.forEach(a => set.add(a.name));
-        setAuthors(Array.from(set).sort((a, b) => a.localeCompare(b)));
-      });
+    let active = true;
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const [categoryResult, authorResult] = await Promise.all([
+          supabase.from("categories").select("slug,name").order("name").abortSignal(controller.signal),
+          supabase.from("posts").select("author").eq("status", "published").limit(1000).abortSignal(controller.signal),
+        ]);
+        if (!active) return;
+        if (!categoryResult.error && categoryResult.data?.length) setCategories(categoryResult.data as Category[]);
+        if (!authorResult.error) {
+          const names = new Set(AUTHORS.map(a => a.name));
+          authorResult.data?.forEach(row => row.author && names.add(row.author));
+          setAuthors(Array.from(names).sort((a, b) => a.localeCompare(b)));
+        }
+      } catch {
+        // The static section/desk lists remain usable if filter metadata is unavailable.
+      }
+    })();
+    return () => { active = false; controller.abort(); };
   }, []);
 
   useEffect(() => {
-    if (!q && category === "all" && range === "any" && author === "all" && selectedTags.length === 0) {
-      setResults([]); return;
-    }
+    let active = true;
+    const controller = new AbortController();
+    setResults([]);
+    setError(false);
+    setLoading(false);
+    if (!hasCriteria || bounds.error) return () => controller.abort();
     setLoading(true);
 
-    let query = supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published");
-
-    if (q) {
-      const term = q.replace(/[%_]/g, "\\$&");
-      query = query.or(`title.ilike.%${term}%,excerpt.ilike.%${term}%,content.ilike.%${term}%`);
-    }
-
-    if (category !== "all") query = query.eq("category_slug", category);
-    if (author !== "all") query = query.eq("author", author);
-    if (selectedTags.length > 0) query = query.contains("keywords", selectedTags);
-
-    if (range === "custom") {
-      if (fromDate) query = query.gte("published_at", new Date(fromDate).toISOString());
-      if (toDate) {
-        const end = new Date(toDate);
-        end.setHours(23, 59, 59, 999);
-        query = query.lte("published_at", end.toISOString());
+    (async () => {
+      try {
+        let query = supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published");
+        if (q) query = query.or(postSearchFilter(q));
+        if (category !== "all") query = query.eq("category_slug", category);
+        if (author !== "all") query = query.eq("author", author);
+        if (selectedTags.length) query = query.contains("keywords", selectedTags);
+        if (bounds.from) query = query.gte("published_at", bounds.from);
+        if (bounds.to) query = query.lte("published_at", bounds.to);
+        query = sort === "popular"
+          ? query.order("views", { ascending: false })
+          : query.order("published_at", { ascending: sort === "oldest" });
+        const result = await query.limit(60).abortSignal(controller.signal);
+        if (result.error) throw result.error;
+        if (active) setResults(normalizePosts(result.data));
+      } catch (cause) {
+        if (active) {
+          console.warn("[search] Stories unavailable:", cause);
+          setError(true);
+        }
+      } finally {
+        if (active) setLoading(false);
       }
-    } else {
-      const since = rangeToFromDate(range);
-      if (since) query = query.gte("published_at", since);
-    }
-
-    if (sort === "newest") query = query.order("published_at", { ascending: false });
-    else if (sort === "oldest") query = query.order("published_at", { ascending: true });
-    else query = query.order("views", { ascending: false });
-
-    query.limit(60).then(({ data }) => {
-      setResults(normalizePosts(data));
-      setLoading(false);
-    });
-  }, [q, category, range, fromDate, toDate, sort, author, tagsParam, selectedTags]);
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [q, category, range, sort, author, selectedTags, bounds, hasCriteria, attempt]);
 
   const updateParam = (key: string, value: string) => {
     const next = new URLSearchParams(params);
@@ -178,23 +182,28 @@ export default function Search() {
         title={q ? `Search: ${q}` : "Search"}
         description={q ? `Results for "${q}" on NewsSparkle.` : "Search the NewsSparkle archive."}
         path={q ? `/search?q=${encodeURIComponent(q)}` : "/search"}
+        robots="noindex, follow"
       />
       <div className="container-prose py-12">
-        <nav className="text-xs text-byline uppercase tracking-wider mb-4">
+        <nav aria-label="Breadcrumb" className="text-xs text-byline uppercase tracking-wider mb-4">
           <Link to="/" className="hover:text-primary">Home</Link> · <span>Search</span>
         </nav>
         <h1 className="font-serif text-4xl font-black text-headline">Search</h1>
         <form onSubmit={submit} className="mt-6 flex gap-2">
+          <label htmlFor={inputId} className="sr-only">Search stories</label>
           <input
+            id={inputId}
+            type="search"
+            name="q"
             value={input}
             onChange={e => setInput(e.target.value)}
             placeholder="Search stories, topics…"
-            className="flex-1 px-4 py-3 bg-background border border-border focus:border-primary focus:outline-none text-base"
+            className="min-w-0 flex-1 px-4 py-3 bg-background border border-border focus:border-primary focus:outline-none text-base"
           />
           <button className="px-5 py-3 bg-primary text-primary-foreground font-semibold">Search</button>
         </form>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 [&>label]:min-w-0 [&_select]:min-w-0">
           <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
             Category
             <select
@@ -203,6 +212,7 @@ export default function Search() {
               className="px-3 py-2 bg-background border border-border focus:border-primary focus:outline-none text-sm text-foreground normal-case tracking-normal"
             >
               <option value="all">All categories</option>
+              {category !== "all" && !categories.some(c => c.slug === category) && <option value={category}>{category}</option>}
               {categories.map(c => (
                 <option key={c.slug} value={c.slug}>{c.name}</option>
               ))}
@@ -217,6 +227,7 @@ export default function Search() {
               className="px-3 py-2 bg-background border border-border focus:border-primary focus:outline-none text-sm text-foreground normal-case tracking-normal"
             >
               <option value="all">All authors</option>
+              {author !== "all" && !authors.includes(author) && <option value={author}>{author}</option>}
               {authors.map(a => <option key={a} value={a}>{a}</option>)}
             </select>
           </label>
@@ -255,7 +266,8 @@ export default function Search() {
               From
               <input
                 type="date"
-                value={fromDate}
+                value={isCalendarDate(fromDate) ? fromDate : ""}
+                max={isCalendarDate(toDate) ? toDate : undefined}
                 onChange={e => updateParam("from", e.target.value)}
                 className="px-3 py-2 bg-background border border-border focus:border-primary focus:outline-none text-sm text-foreground"
               />
@@ -264,7 +276,8 @@ export default function Search() {
               To
               <input
                 type="date"
-                value={toDate}
+                value={isCalendarDate(toDate) ? toDate : ""}
+                min={isCalendarDate(fromDate) ? fromDate : undefined}
                 onChange={e => updateParam("to", e.target.value)}
                 className="px-3 py-2 bg-background border border-border focus:border-primary focus:outline-none text-sm text-foreground"
               />
@@ -272,14 +285,16 @@ export default function Search() {
           </div>
         )}
 
+        {range === "custom" && <p className="mt-2 text-xs text-byline">Dates include the whole day, in UTC.</p>}
+        {bounds.error && <p role="alert" className="mt-3 text-sm text-destructive">{bounds.error}</p>}
+
         <div className="mt-3">
-          <label className="flex flex-col gap-1 text-xs text-byline uppercase tracking-wider">
-            Tags / Keywords
+          <label htmlFor={tagId} className="block text-xs text-byline uppercase tracking-wider mb-1">Tags / Keywords</label>
             <div className="flex flex-wrap items-center gap-2 px-2 py-2 bg-background border border-border focus-within:border-primary">
               {selectedTags.map(t => (
                 <span
                   key={t}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary rounded text-xs normal-case tracking-normal"
+                  className="inline-flex max-w-full break-all items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary rounded text-xs normal-case tracking-normal"
                 >
                   {t}
                   <button
@@ -293,6 +308,7 @@ export default function Search() {
                 </span>
               ))}
               <input
+                id={tagId}
                 value={tagInput}
                 onChange={e => setTagInput(e.target.value)}
                 onKeyDown={onTagKeyDown}
@@ -301,13 +317,12 @@ export default function Search() {
                 className="flex-1 min-w-[120px] bg-transparent text-sm text-foreground normal-case tracking-normal focus:outline-none py-1"
               />
             </div>
-          </label>
         </div>
 
-        {(q || activeFilterCount > 0) && (
+        {hasCriteria && (
           <div className="mt-6 flex items-center justify-between gap-3">
-            <p className="text-sm text-byline">
-              {loading
+            <p role="status" className="text-sm text-byline">
+              {error ? "Search is temporarily unavailable." : bounds.error ? "Check the date filters above." : loading
                 ? "Searching…"
                 : `${results.length} result${results.length === 1 ? "" : "s"}${q ? ` for "${q}"` : ""}`}
             </p>
@@ -323,13 +338,16 @@ export default function Search() {
         )}
       </div>
 
-      <div className="container-wide pb-16">
-        {results.length > 0 && (
+      <div className="container-wide pb-16" aria-busy={loading}>
+        {!hasCriteria && <p className="text-center py-10 text-byline">Enter a search term or choose a filter to explore the archive.</p>}
+        {error && <LoadError onRetry={() => setAttempt(value => value + 1)} />}
+        {loading && <p role="status" className="text-center py-12 text-byline">Searching stories…</p>}
+        {!error && !loading && results.length > 0 && (
           <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3">
             {results.map(p => <PostCard key={p.id} post={p} />)}
           </div>
         )}
-        {!loading && (q || activeFilterCount > 0) && results.length === 0 && (
+        {!error && !bounds.error && !loading && hasCriteria && results.length === 0 && (
           <p className="text-center py-20 text-byline">No stories matched. Try a broader query or different filters.</p>
         )}
       </div>

@@ -18,7 +18,8 @@ export const supabase = isDemoMode
   ? (demoClient as unknown as ReturnType<typeof createClient<Database>>)
   : createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
       auth: {
-        storage: localStorage,
+        // Use the SDK's browser-storage detection and in-memory fallback.
+        // Eagerly passing localStorage throws in privacy-restricted browsers.
         persistSession: true,
         autoRefreshToken: true,
       },

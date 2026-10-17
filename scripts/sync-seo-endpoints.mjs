@@ -115,5 +115,21 @@ ${feeds.map((f) => `Sitemap: ${f.loc}`).join("\n")}
 writeFileSync(resolve(root, "public/sitemap.xml"), sitemapIndex, "utf8");
 writeFileSync(resolve(root, "public/robots.txt"), robots, "utf8");
 
+// Keep the machine-readable resource links on the same public hosts as the UI.
+const llmsPath = resolve(root, "public/llms.txt");
+if (existsSync(llmsPath)) {
+  const resources = {
+    Website: siteUrl,
+    "Main Sitemap": `${siteUrl}/sitemap.xml`,
+    "News Sitemap": supabaseUrl ? `${supabaseUrl}/functions/v1/news-sitemap` : "Not configured",
+    RSS: supabaseUrl ? `${supabaseUrl}/functions/v1/rss` : "Not configured",
+  };
+  let llms = readFileSync(llmsPath, "utf8");
+  for (const [label, value] of Object.entries(resources)) {
+    llms = llms.replace(new RegExp(`^- \\*\\*${label}\\*\\*: .*$`, "m"), `- **${label}**: ${value}`);
+  }
+  writeFileSync(llmsPath, llms, "utf8");
+}
+
 console.log(`[seo] sitemap.xml + robots.txt updated (site: ${siteUrl})`);
 if (feeds.length) console.log(`[seo] feeds: ${feeds.map((f) => f.loc).join(", ")}`);

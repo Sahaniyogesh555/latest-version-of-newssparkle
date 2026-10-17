@@ -51,16 +51,22 @@ const asRows = (value: unknown): Row[] => (Array.isArray(value) ? (value as Row[
 
 /** Supports the `col.ilike.%term%` fragments used by the search page. */
 function matchesOr(row: Row, expression: string): boolean {
-  const terms = [...expression.matchAll(/([a-z_]+)\.ilike\.%([^%,]+)%/gi)];
-  if (terms.length === 0) return true;
-  return terms.some(([, column, needle]) =>
-    String(row[column] ?? "").toLowerCase().includes(needle.toLowerCase()),
-  );
+  const terms = [...expression.matchAll(/([a-z_]+)\.ilike\.("(?:\\.|[^"\\])*"|[^,]+)/gi)];
+  if (terms.length === 0) return false;
+  return terms.some(([, column, raw]) => {
+    let pattern: string;
+    try { pattern = raw.startsWith('"') ? JSON.parse(raw) : raw; } catch { return false; }
+    const needle = pattern.replace(/^%|%$/g, "").replace(/\\([\\%_])/g, "$1");
+    return String(row[column] ?? "").toLowerCase().includes(needle.toLowerCase());
+  });
 }
 
 function makeChain(table: string): DemoQuery {
   let rows: Row[] = [...(TABLES[table] ?? [])];
   let head = false;
+  let offset = 0;
+  let end: number | undefined;
+  let limit: number | undefined;
 
   const api: Record<string, unknown> = {};
 
@@ -96,13 +102,15 @@ function makeChain(table: string): DemoQuery {
   step("order", ([column, options]) => {
     const ascending = (options as { ascending?: boolean } | undefined)?.ascending ?? true;
     rows = [...rows].sort((a, b) => {
-      const left = String(a[column as string] ?? "");
-      const right = String(b[column as string] ?? "");
-      return ascending ? left.localeCompare(right) : right.localeCompare(left);
+      const left = a[column as string] ?? "";
+      const right = b[column as string] ?? "";
+      const comparison = typeof left === "number" && typeof right === "number"
+        ? left - right : String(left).localeCompare(String(right));
+      return ascending ? comparison : -comparison;
     });
   });
-  step("limit", ([count]) => { rows = rows.slice(0, Number(count)); });
-  step("range", ([from, to]) => { rows = rows.slice(Number(from), Number(to) + 1); });
+  step("limit", ([count]) => { limit = Number(count); });
+  step("range", ([from, to]) => { offset = Number(from); end = Number(to) + 1; });
 
   // Callable but ignored: projection, count mode, abort signals, overrides.
   step("select", ([, options]) => {
@@ -110,9 +118,11 @@ function makeChain(table: string): DemoQuery {
   });
   for (const noop of ["returns", "abortSignal", "overrideTypes", "throwOnError"]) step(noop, () => {});
 
-  const finish = () => ({ data: head ? null : rows, error: null, count: rows.length });
-  api.single = async () => ({ data: rows[0] ?? null, error: rows[0] ? null : { message: "No rows found" } });
-  api.maybeSingle = async () => ({ data: rows[0] ?? null, error: null });
+  // PostgREST counts filtered rows BEFORE applying pagination, not the page length.
+  const pageRows = () => rows.slice(offset, end).slice(0, limit);
+  const finish = () => ({ data: head ? null : pageRows(), error: null, count: rows.length });
+  api.single = async () => ({ data: pageRows()[0] ?? null, error: pageRows()[0] ? null : { message: "No rows found" } });
+  api.maybeSingle = async () => ({ data: pageRows()[0] ?? null, error: null });
   api.then = (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
     Promise.resolve(finish()).then(resolve, reject);
 

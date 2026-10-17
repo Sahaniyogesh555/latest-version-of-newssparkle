@@ -1,13 +1,13 @@
 import { Link, useLocation } from "react-router-dom";
-import { Home, Search, Bookmark, User, Menu } from "lucide-react";
+import { Home, Search, Bookmark, Users, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { icon: Home, label: "Home", href: "/" },
   { icon: Search, label: "Search", href: "/search" },
   { icon: Bookmark, label: "Saved", href: "/bookmarks" },
-  { icon: User, label: "Profile", href: "/authors" },
-  { icon: Menu, label: "More", href: "/about" },
+  { icon: Users, label: "Authors", href: "/authors" },
+  { icon: Info, label: "About", href: "/about" },
 ];
 
 export function MobileBottomNav() {
@@ -29,6 +29,7 @@ export function MobileBottomNav() {
             <Link
               key={href}
               to={href}
+              aria-current={isActive ? "page" : undefined}
               className={cn(
                 "flex flex-col items-center gap-1 p-2 rounded-lg transition-colors min-w-0 flex-1",
                 isActive

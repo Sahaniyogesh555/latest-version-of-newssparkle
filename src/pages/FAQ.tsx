@@ -1,17 +1,18 @@
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { SITE } from "@/lib/site";
+import { CATEGORIES, SITE } from "@/lib/site";
+import { RSS_URL } from "@/lib/endpoints";
 import { Link } from "react-router-dom";
 
 const FAQS = [
   {
     q: `What is ${SITE.name}?`,
-    a: `${SITE.name} is an independent digital news publication covering breaking news, politics & government, business & economy, technology & AI, health & lifestyle, and entertainment & trending. We publish 18 fresh, fact-checked stories every day across six dedicated sections.`,
+    a: `${SITE.name} is an independent digital news publication covering breaking news, politics & government, business & economy, technology & AI, health & lifestyle, and entertainment & trending. Explore our six dedicated sections and the publication details on each story.`,
   },
   {
     q: "How often is the site updated?",
-    a: "Our editorial desk publishes new articles 18 times per day in three slots — morning briefings, midday trending explainers, and evening deep-dive analysis — so the homepage is always current.",
+    a: "New stories appear when they are published by the newsroom. Publication frequency varies; check each story’s published and updated timestamps for recency.",
   },
   {
     q: "Where do your stories come from?",
@@ -27,11 +28,11 @@ const FAQS = [
   },
   {
     q: "Do you have a sitemap or RSS feed?",
-    a: `Yes — our XML sitemap is available at /sitemap.xml and is updated continuously as new stories publish.`,
+    a: `Our XML sitemap index is available at /sitemap.xml. The RSS feed is provided by our feed service; live availability depends on that service being configured and online.`,
   },
   {
     q: "How do I follow specific topics?",
-    a: "Visit any of our six section pages — Breaking & National, International, Business & Finance, Technology & AI, Sports, or Entertainment & Viral — to see the latest headlines for that topic.",
+    a: `Visit our section pages — ${CATEGORIES.map(category => category.name).join(", ")} — to see the latest headlines for each topic.`,
   },
   {
     q: "Can I republish your articles?",
@@ -70,7 +71,10 @@ export default function FAQ() {
           {FAQS.map((f, i) => (
             <AccordionItem key={i} value={`item-${i}`}>
               <AccordionTrigger className="text-left font-serif text-lg font-semibold text-headline">{f.q}</AccordionTrigger>
-              <AccordionContent className="text-foreground/85 leading-relaxed text-base">{f.a}</AccordionContent>
+              <AccordionContent className="text-foreground/85 leading-relaxed text-base">
+                {f.a}
+                {f.q === "Do you have a sitemap or RSS feed?" && <div className="mt-3 flex flex-wrap gap-4"><a href="/sitemap.xml" className="text-primary underline">XML sitemap</a>{RSS_URL && <a href={RSS_URL} className="text-primary underline">RSS feed</a>}</div>}
+              </AccordionContent>
             </AccordionItem>
           ))}
         </Accordion>

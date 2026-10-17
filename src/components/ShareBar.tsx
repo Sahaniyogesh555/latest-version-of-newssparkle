@@ -1,14 +1,15 @@
-import { useState } from "react";
 import { Twitter, Facebook, Linkedin, Link2, Check, MessageCircle } from "lucide-react";
+import { useClipboard } from "@/hooks/use-clipboard";
 
 interface Props {
   url: string;
   title: string;
   compact?: boolean;
+  vertical?: boolean;
 }
 
-export function ShareBar({ url, title, compact = false }: Props) {
-  const [copied, setCopied] = useState(false);
+export function ShareBar({ url, title, compact = false, vertical = false }: Props) {
+  const { copied, copyFailed, copy } = useClipboard(url);
   const e = encodeURIComponent;
   const links = [
     { name: "X", href: `https://twitter.com/intent/tweet?url=${e(url)}&text=${e(title)}`, Icon: Twitter },
@@ -16,35 +17,25 @@ export function ShareBar({ url, title, compact = false }: Props) {
     { name: "LinkedIn", href: `https://www.linkedin.com/sharing/share-offsite/?url=${e(url)}`, Icon: Linkedin },
     { name: "WhatsApp", href: `https://wa.me/?text=${e(`${title} ${url}`)}`, Icon: MessageCircle },
   ];
-
-  const copy = async () => {
-    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch { /* ignore */ }
-  };
-
-  const buttonSize = compact ? "size-8" : "size-9";
+  const size = vertical ? "size-10" : compact ? "size-8" : "size-9";
   const iconSize = compact ? "size-3.5" : "size-4";
+  const buttonClass = `${size} shrink-0 inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full`;
 
   return (
-    <div className="flex items-center gap-2 flex-wrap" aria-label="Share this article">
+    <div role="group" aria-label="Share this article" className={`flex gap-2 ${vertical ? "flex-col" : "items-center flex-wrap"}`}>
       {links.map(({ name, href, Icon }) => (
-        <a
-          key={name}
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`Share on ${name}`}
-          className={`${buttonSize} inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full`}
-        >
-          <Icon className={iconSize} />
-        </a>
+        <a key={name} href={href} target="_blank" rel="noopener noreferrer" aria-label={`Share on ${name}`} className={buttonClass}><Icon className={iconSize} /></a>
       ))}
-      <button
-        onClick={copy}
-        aria-label="Copy link"
-        className={`${buttonSize} inline-flex items-center justify-center border border-border hover:border-primary hover:text-primary text-byline transition-colors rounded-full`}
-      >
+      <button type="button" onClick={copy} aria-label={copied ? "Link copied" : "Copy link"} className={buttonClass}>
         {copied ? <Check className={`${iconSize} text-primary`} /> : <Link2 className={iconSize} />}
       </button>
+      <span role="status" className="sr-only">{copied ? "Article link copied." : ""}</span>
+      {copyFailed && (
+        <div className={vertical ? "w-52" : "basis-full"}>
+          <p role="alert" className="text-xs text-byline mb-2">Clipboard unavailable. Select and copy this link instead.</p>
+          <input aria-label="Article link" readOnly value={url} onFocus={event => event.currentTarget.select()} className="min-w-0 w-full rounded border border-border bg-background p-2 text-xs" />
+        </div>
+      )}
     </div>
   );
 }

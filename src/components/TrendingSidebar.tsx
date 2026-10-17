@@ -64,7 +64,7 @@ export function TrendingSidebar() {
       </div>
 
       <Link
-        to="/trending"
+        to="/search?sort=popular"
         className="inline-block mt-4 text-xs text-primary hover:text-primary/80 font-medium uppercase tracking-wider"
       >
         View All Trending →

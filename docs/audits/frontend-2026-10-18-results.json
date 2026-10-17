@@ -1,0 +1,505 @@
+{
+  "audit_date_local": "2026-10-18",
+  "timezone": "Asia/Katmandu",
+  "branch": "arena/e59698ee-latest-version-of-newssparkle",
+  "baseline_commit": "f960012cae6ffbd33b5d017ae1abc075254fbca1",
+  "conditions": {
+    "browser": "Headless Chromium via Playwright",
+    "content_routes": "Local labelled fixtures; production demo mode not enabled",
+    "external_requests": "Blocked; remote images fulfilled locally with existing og-default.jpg; local portraits unchanged",
+    "non_demo_probe": "Optimized real adapter with external requests blocked; data routes waited for explicit error states",
+    "permissions": "Clipboard and Notification permission outcomes simulated",
+    "not_verified_live": [
+      "production hostname runtime",
+      "live Supabase story/feed/realtime/view responses",
+      "Google translation success",
+      "external fonts/images",
+      "external sharing",
+      "mail delivery",
+      "background push",
+      "advertising",
+      "real-user performance"
+    ]
+  },
+  "verify": {
+    "command": "npm run verify",
+    "status": "PASS",
+    "tests_passed": 295,
+    "tests_total": 295,
+    "test_files_passed": 20,
+    "new_audit_tests": 60,
+    "typecheck": "PASS",
+    "lint": "PASS",
+    "optimized_non_demo_build": "PASS",
+    "diff_check": "PASS",
+    "function_check": "SKIPPED: Deno is not installed; backend unchanged"
+  },
+  "route_inventory": [
+    "/",
+    "/about",
+    "/contact",
+    "/editorial-policy",
+    "/corrections",
+    "/faq",
+    "/privacy",
+    "/privacy-policy",
+    "/terms",
+    "/disclaimer",
+    "/brand",
+    "/authors",
+    "/bookmarks",
+    "/search",
+    "/category/breaking-news",
+    "/category/politics",
+    "/category/business",
+    "/category/technology",
+    "/category/health",
+    "/category/entertainment",
+    "/author/editorial-desk",
+    "/author/politics-desk",
+    "/author/business-desk",
+    "/author/technology-desk",
+    "/author/health-desk",
+    "/author/entertainment-desk",
+    "/post/central-bank-holds-rates-steady",
+    "/post/open-source-model-release-small-teams",
+    "/tag/economy",
+    "/tag/interest%20rates",
+    "/tag/100%25",
+    "/search?q=energy",
+    "/search?sort=popular",
+    "/search?range=custom&from=bad&to=bad",
+    "/search?q=%22%2C%28",
+    "/category/missing-category",
+    "/author/missing-author",
+    "/post/missing-post",
+    "/this-page-does-not-exist"
+  ],
+  "viewport_widths": [
+    320,
+    390,
+    768,
+    1024,
+    1440
+  ],
+  "light_axe_routes": [
+    "/",
+    "/contact",
+    "/authors",
+    "/bookmarks",
+    "/category/business",
+    "/author/editorial-desk",
+    "/post/central-bank-holds-rates-steady",
+    "/search?q=energy",
+    "/this-page-does-not-exist"
+  ],
+  "light_axe_widths": [
+    390,
+    1440
+  ],
+  "baseline": {
+    "route_viewport_combinations": 195,
+    "horizontal_overflow": 101,
+    "error_boundary_panic": 10,
+    "unhandled_page_errors": 10,
+    "nested_anchor_links": 5,
+    "incorrect_main_landmark_count": 30,
+    "placeholder_href_links": 165,
+    "navigation_failures": 0,
+    "axe_samples": 18,
+    "axe_rule_occurrences": 53
+  },
+  "after_development": {
+    "route_viewport_combinations": 195,
+    "horizontal_overflow": 0,
+    "error_boundary_panic": 0,
+    "unhandled_page_errors": 0,
+    "nested_anchor_links": 0,
+    "incorrect_main_landmark_count": 0,
+    "placeholder_href_links": 0,
+    "navigation_failures": 0,
+    "axe_samples": 18,
+    "axe_rule_occurrences": 0
+  },
+  "after_optimized_fixture_build": {
+    "route_viewport_combinations": 195,
+    "horizontal_overflow": 0,
+    "error_boundary_panic": 0,
+    "unhandled_page_errors": 0,
+    "nested_anchor_links": 0,
+    "incorrect_main_landmark_count": 0,
+    "placeholder_href_links": 0,
+    "navigation_failures": 0,
+    "axe_samples": 18,
+    "axe_rule_occurrences": 0
+  },
+  "remaining_route_matrix_defects": [],
+  "interaction_runs": {
+    "development_fixture_build": {
+      "passed": 15,
+      "total": 15,
+      "scenarios": [
+        {
+          "name": "responsive menu and route navigation",
+          "pass": true,
+          "evidence": {
+            "menuClosedAfterNavigation": true,
+            "tabletOverflow": false
+          }
+        },
+        {
+          "name": "search dialog bounds, focus trap, submit, Escape and focus return",
+          "pass": true,
+          "evidence": {
+            "bounds": {
+              "x": 17.318866729736328,
+              "y": 7.774313926696777,
+              "width": 355.36225509643555,
+              "height": 240.21695804595947
+            },
+            "modalAxeViolations": 0
+          }
+        },
+        {
+          "name": "bookmarks save, persistence, removal and no card navigation",
+          "pass": true,
+          "evidence": {
+            "savedAcrossReload": true,
+            "removed": true
+          }
+        },
+        {
+          "name": "contact prepares a draft, never posts or claims delivery, and invalidates edited drafts",
+          "pass": true,
+          "evidence": {
+            "postRequests": 0,
+            "deliveryClaim": false,
+            "draftInvalidatedOnEdit": true
+          }
+        },
+        {
+          "name": "newsletter unavailable state and honest RSS destination",
+          "pass": true,
+          "evidence": {
+            "noEmailCollected": true,
+            "rssHostCorrect": true,
+            "liveRssNotContacted": true
+          }
+        },
+        {
+          "name": "clipboard denial shows a manually copyable URL",
+          "pass": true,
+          "evidence": {
+            "manualFallback": true,
+            "falseSuccess": false
+          }
+        },
+        {
+          "name": "article contents scroll below the sticky header; no mobile share obstruction",
+          "pass": true,
+          "evidence": {
+            "anchorClearsHeader": true,
+            "mobileRailHidden": true,
+            "trendingWorks": true
+          }
+        },
+        {
+          "name": "blocked and corrupted storage are recoverable",
+          "pass": true,
+          "evidence": {
+            "scenarios": 4,
+            "noCrash": true
+          }
+        },
+        {
+          "name": "failed translation retains English and reports failure",
+          "pass": true,
+          "evidence": {
+            "noFalseLanguageClaim": true,
+            "thirdPartyFailureVisible": true
+          }
+        },
+        {
+          "name": "theme preference and browser UI survive client-side navigation",
+          "pass": true,
+          "evidence": {
+            "persists": true,
+            "themeColorConsistent": true
+          }
+        },
+        {
+          "name": "first visit consent and optional notifications do not stack or cover bottom navigation",
+          "pass": true,
+          "evidence": {
+            "notificationPermissionStubbed": true,
+            "promptsSeparated": true,
+            "navNotObscured": true
+          }
+        },
+        {
+          "name": "alerts dismiss even if writes are denied",
+          "pass": true,
+          "evidence": {
+            "dismissed": true
+          }
+        },
+        {
+          "name": "all local technical files return actual content, not the SPA document",
+          "pass": true,
+          "evidence": {
+            "/.well-known/security.txt": "text/plain",
+            "/sitemap.xml": "text/xml",
+            "/robots.txt": "text/plain",
+            "/llms.txt": "text/plain",
+            "/manifest.json": "application/json"
+          }
+        },
+        {
+          "name": "dark-mode automated accessibility samples",
+          "pass": true,
+          "evidence": {
+            "samples": 18,
+            "violations": 0
+          }
+        },
+        {
+          "name": "local author image decoding and final mobile view",
+          "pass": true,
+          "evidence": {
+            "portraits": 6,
+            "allDecoded": true
+          }
+        }
+      ]
+    },
+    "optimized_fixture_build": {
+      "passed": 15,
+      "total": 15,
+      "scenarios": [
+        {
+          "name": "responsive menu and route navigation",
+          "pass": true,
+          "evidence": {
+            "menuClosedAfterNavigation": true,
+            "tabletOverflow": false
+          }
+        },
+        {
+          "name": "search dialog bounds, focus trap, submit, Escape and focus return",
+          "pass": true,
+          "evidence": {
+            "bounds": {
+              "x": 16.67107391357422,
+              "y": 15.743875503540039,
+              "width": 356.65784454345703,
+              "height": 241.0927333831787
+            },
+            "modalAxeViolations": 0
+          }
+        },
+        {
+          "name": "bookmarks save, persistence, removal and no card navigation",
+          "pass": true,
+          "evidence": {
+            "savedAcrossReload": true,
+            "removed": true
+          }
+        },
+        {
+          "name": "contact prepares a draft, never posts or claims delivery, and invalidates edited drafts",
+          "pass": true,
+          "evidence": {
+            "postRequests": 0,
+            "deliveryClaim": false,
+            "draftInvalidatedOnEdit": true
+          }
+        },
+        {
+          "name": "newsletter unavailable state and honest RSS destination",
+          "pass": true,
+          "evidence": {
+            "noEmailCollected": true,
+            "rssHostCorrect": true,
+            "liveRssNotContacted": true
+          }
+        },
+        {
+          "name": "clipboard denial shows a manually copyable URL",
+          "pass": true,
+          "evidence": {
+            "manualFallback": true,
+            "falseSuccess": false
+          }
+        },
+        {
+          "name": "article contents scroll below the sticky header; no mobile share obstruction",
+          "pass": true,
+          "evidence": {
+            "anchorClearsHeader": true,
+            "mobileRailHidden": true,
+            "trendingWorks": true
+          }
+        },
+        {
+          "name": "blocked and corrupted storage are recoverable",
+          "pass": true,
+          "evidence": {
+            "scenarios": 4,
+            "noCrash": true
+          }
+        },
+        {
+          "name": "failed translation retains English and reports failure",
+          "pass": true,
+          "evidence": {
+            "noFalseLanguageClaim": true,
+            "thirdPartyFailureVisible": true
+          }
+        },
+        {
+          "name": "theme preference and browser UI survive client-side navigation",
+          "pass": true,
+          "evidence": {
+            "persists": true,
+            "themeColorConsistent": true
+          }
+        },
+        {
+          "name": "first visit consent and optional notifications do not stack or cover bottom navigation",
+          "pass": true,
+          "evidence": {
+            "notificationPermissionStubbed": true,
+            "promptsSeparated": true,
+            "navNotObscured": true
+          }
+        },
+        {
+          "name": "alerts dismiss even if writes are denied",
+          "pass": true,
+          "evidence": {
+            "dismissed": true
+          }
+        },
+        {
+          "name": "all local technical files return actual content, not the SPA document",
+          "pass": true,
+          "evidence": {
+            "/.well-known/security.txt": "text/plain",
+            "/sitemap.xml": "text/xml",
+            "/robots.txt": "text/plain",
+            "/llms.txt": "text/plain",
+            "/manifest.json": "application/json"
+          }
+        },
+        {
+          "name": "dark-mode automated accessibility samples",
+          "pass": true,
+          "evidence": {
+            "samples": 18,
+            "violations": 0
+          }
+        },
+        {
+          "name": "local author image decoding and final mobile view",
+          "pass": true,
+          "evidence": {
+            "portraits": 6,
+            "allDecoded": true
+          }
+        }
+      ]
+    }
+  },
+  "optimized_non_demo_cases": [
+    {
+      "path": "/about",
+      "h1": [
+        "Professional news reporting for the modern reader."
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/about?audit=methods",
+      "h1": [
+        "Professional news reporting for the modern reader."
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/about?audit=getter",
+      "h1": [
+        "Professional news reporting for the modern reader."
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/",
+      "h1": [
+        "NewsSparkle delivers premium journalism for fast-moving readers."
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/search?q=rate",
+      "h1": [
+        "Search"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/category/business",
+      "h1": [
+        "Business & Economy"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/tag/100%25",
+      "h1": [
+        "#100%"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/author/business-desk",
+      "h1": [
+        "Business & Markets Desk"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/post/central-bank-holds-rates-steady",
+      "h1": [
+        "We could not load this story"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/contact",
+      "h1": [
+        "Contact our newsroom"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    },
+    {
+      "path": "/bookmarks",
+      "h1": [
+        " Saved"
+      ],
+      "unhandled_page_errors": [],
+      "demo_banners": 0
+    }
+  ],
+  "deployment": "No production deployment or main merge performed by this audit",
+  "report": "frontend_website_audit.md"
+}
