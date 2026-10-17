@@ -81,24 +81,26 @@ function deps(overrides: Partial<PipelineDeps> & { db: PipelineDeps["db"] }): Pi
 /* Ingest                                                                     */
 /* -------------------------------------------------------------------------- */
 
+// Like the other fixtures, RSS dates must follow the injected clock; fixed
+// dates eventually cross the 36-hour freshness cutoff and break valid tests.
 const RSS_GOOD = `<?xml version="1.0"?><rss version="2.0"><channel>
   <item>
     <title><![CDATA[Energy regulator reports 12% rise in wholesale prices]]></title>
     <link>https://example.com/energy</link>
     <description>Wholesale energy prices rose 12% in March, adding around 180 pounds to a typical annual bill, the regulator said.</description>
-    <pubDate>Fri, 16 Oct 2026 09:00:00 GMT</pubDate>
+    <pubDate>${new Date(minutesAgo(60)).toUTCString()}</pubDate>
   </item>
   <item>
     <title>Subscribe to our newsletter for the best morning coverage</title>
     <link>https://example.com/newsletter</link>
     <description>Get the best of our journalism in your inbox every morning, with analysis and comment.</description>
-    <pubDate>Fri, 16 Oct 2026 08:00:00 GMT</pubDate>
+    <pubDate>${new Date(minutesAgo(120)).toUTCString()}</pubDate>
   </item>
   <item>
     <title>Emergency crews restore power after overnight storms hit the coast</title>
     <link>https://example.com/storm</link>
     <description>Crews worked through the night after storms brought down trees and damaged substations across three counties.</description>
-    <pubDate>Fri, 16 Oct 2026 07:00:00 GMT</pubDate>
+    <pubDate>${new Date(minutesAgo(180)).toUTCString()}</pubDate>
   </item>
 </channel></rss>`;
 
