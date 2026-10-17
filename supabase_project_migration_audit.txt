@@ -1,0 +1,531 @@
+NEWSSPARKLE — NEW SUPABASE PROJECT INTEGRATION AUDIT
+====================================================
+
+Date:            2026-10-17
+Branch:          arena/e59698ee-latest-version-of-newssparkle
+Audited commit:  eb1b0f0 (13 migration files)
+Target project:  xuqxautmflofkvbsaanh — NewsSparkle, ap-south-1 (Mumbai),
+                 PostgreSQL 17.11, ACTIVE_HEALTHY
+Project in code: ruusbjlabbojpbawbphc (the old project)
+
+VERDICT: NOT SAFE TO RUN `db push` AGAINST THE NEW PROJECT YET.
+Three defects must be fixed first (F1, F2, F3). F1 stops the migration
+itself; F2 is an access-control hole that the current tests cannot see;
+F3 silently points the new project's cron traffic at the old one.
+
+Nothing was deployed, applied, enabled, rotated or triggered. No credential
+was read or changed. This report is the only new file; no existing file was
+modified.
+
+HOW TO READ THE EVIDENCE TAGS
+  [REPO]        read from this repository at eb1b0f0 (path:line given)
+  [PLATFORM]    read from Supabase's own source, not guessed:
+                supabase/postgres @ 7ee80b2a9d7b (2026-10-16)
+                supabase/cli      @ 8a549dffa6bc (2026-10-14)
+                citusdata/pg_cron v1.6.4
+  [LOCAL DEMO]  executed locally on real PostgreSQL 18.6 (PGlite) with a
+                temporary probe that was deleted afterwards (git clean)
+  [LIVE]        needs the real project; BLOCKED in this environment
+                (no *.supabase.co egress, no Supabase credentials)
+
+--------------------------------------------------------------------------------
+1. FINDINGS SUMMARY
+--------------------------------------------------------------------------------
+  FAIL          5   F1..F5 below
+  PASS          9   P1..P9
+  BLOCKED       6   B1..B6
+  NOT VERIFIED  5   N1..N5
+
+Biggest risk, in order:
+  F2  anon can execute the publishing trigger functions on a real project
+  F1  the Phase 6 fail-closed gate cannot run as written (permission denied)
+  F3  cron falls back to the OLD project when one Vault row is missing
+  F4  five jobs are briefly ACTIVE during the push (foreign targets only)
+  F5  four documentation statements that are not true
+
+--------------------------------------------------------------------------------
+2. FINDINGS IN DETAIL
+--------------------------------------------------------------------------------
+
+FAIL F1 — The Phase 6 gate cannot execute on Supabase: cron.job is SELECT-only
+          [REPO] + [PLATFORM] + [LOCAL DEMO]                    Severity: blocker
+
+  The canonical gate is a direct UPDATE:
+    supabase/migrations/20261016090100_phase6_autonomy_crons.sql:189
+    supabase/migrations/20261016090200_phase6_activation_gate.sql:27
+    src/test/harness/cron-contract.ts:148 (GATE_SQL, RESUME_ALL_SQL:157)
+    phase6_activation_checklist.txt:135, 493, 514, 530, 556-566
+    docs/OPERATIONS.md:197, 204, 207, 236, 283-294
+
+  On Supabase the `postgres` role is not a superuser (initdb's superuser is
+  `supabase_admin`: supabase/postgres Dockerfile-17:176 POSTGRES_USER, and only
+  supabase_admin is altered to superuser in init-scripts/…0000-initial-schema.sql:8).
+  [PLATFORM] The image also enforces SELECT-only access for `postgres` on cron.job:
+    migrations/db/migrations/20231020085357_revoke_writes_on_cron_job_from_postgres.sql
+      revoke all on table cron.job from postgres;
+      grant select on table cron.job to postgres with grant option;
+    and extensions.grant_pg_cron_access() (re)applies exactly that on
+    CREATE EXTENSION (ansible/…/pg_cron/after-create.sql, same two lines).
+
+  [LOCAL DEMO] A role holding only SELECT on cron.job gets:
+    update cron.job set active = false … → "permission denied for table job"
+    select count(*) from cron.job        → 14 (works)
+  So `db push` on the new project would fail at the LAST section of the cron
+  migration (3b), aborting the push; the repair migration 20261016090200 would
+  never run, and every activation step (G1-G3) would fail the same way.
+  The earlier "PASS — SQL form verified offline" was true only in a harness
+  where postgres owns cron.job.
+
+  RECOMMENDED FIX (to be implemented, not now):
+    select cron.alter_job(jobid, active := false)
+      from cron.job
+     where jobname in ('write-desk','publish-scheduler',
+                       'auto-publish-morning','auto-publish-midday','auto-publish-every',
+                       … the same 8 names …);
+    -- "resume everything":  select cron.alter_job(jobid, active := true) from cron.job;
+    -- "stop everything":    select cron.alter_job(jobid, active := false) from cron.job;
+
+  Why this is the right primitive:
+    [PLATFORM] pg_cron 1.6.4 src/job_metadata.c, AlterJob():
+      - builds SET only from non-NULL arguments, so `active` alone never
+        touches schedule/command/database;
+      - runs the UPDATE as the extension owner (SetUserIdAndSecContext(
+        CronExtensionOwner(), …)), so the caller needs EXECUTE, not UPDATE;
+      - adds `and username = currentuser` for non-superusers — the jobs are
+        created by `postgres` (ScheduleCronJob uses the current user as the
+        job username), so `postgres` owns them;
+      - calls InvalidateJobCache(), which is the same no-restart guarantee the
+        UPDATE had.
+    [PLATFORM] Supabase grants `all on all functions in schema cron to postgres
+      with grant option`, so EXECUTE survives pg_cron's own REVOKE … FROM PUBLIC.
+
+  Test-harness implications (part of the fix):
+    - cron-contract.ts, both migrations, the checklist, OPERATIONS and the
+      tests must change in one commit; the contract file already centralises
+      the statement, which makes this one edit plus docs.
+    - sql-staging.ts must model the platform: revoke INSERT/UPDATE/DELETE on
+      cron.job from postgres (keep SELECT) and make the cron.alter_job stub
+      SECURITY DEFINER with an owner switch, mirroring AlterJob(). Without
+      this the regression test would be green on a broken design again.
+
+FAIL F2 — anon/authenticated can execute every SECURITY DEFINER function the
+          Phase 6 migrations create (including the publishing triggers)
+          [REPO] + [PLATFORM] + [LOCAL DEMO]                 Severity: critical
+
+  Every function is revoked from the PUBLIC pseudo-role only:
+    20261016090000_phase6_autonomy_schema.sql:263,294,316,330,386,409
+      record_alert, claim_ingested_items, category_published_count,
+      newsroom_llm_calls_today, newsroom_status, prune_automation_tables
+    20261016090100_phase6_autonomy_crons.sql:87
+      newsroom_trigger (builds net.http_post with the Vault secret)
+    20261015120200_reschedule_auto_publish_18_per_day.sql:85,128,166
+      trigger_auto_publish, trigger_breaking_news_monitor,
+      trigger_notifications_dispatcher
+    Pattern used everywhere: `revoke all on function … from public;`
+
+  [PLATFORM] Supabase grants privileges at creation time:
+    init-scripts/00000000000000-initial-schema.sql:41
+      alter default privileges in schema public grant all on functions
+        to postgres, anon, authenticated, service_role;
+    Those are explicit per-role grants. `REVOKE … FROM public` removes only the
+    PUBLIC entry and leaves anon/authenticated/service_role intact.
+
+  [LOCAL DEMO] Replayed the full 13-migration chain on PostgreSQL 18.6 with
+    those three default-privilege lines applied first:
+      has_function_privilege('anon', …, 'EXECUTE') = TRUE for
+        newsroom_trigger, trigger_auto_publish, trigger_breaking_news_monitor,
+        trigger_notifications_dispatcher, prune_automation_tables,
+        claim_ingested_items, record_alert, newsroom_status
+      Tables stayed locked (anon SELECT/INSERT false on content_sources,
+      ingested_items, pipeline_runs; posts SELECT true, INSERT false).
+    Without those default-privilege lines the current test passes — which is
+    exactly why the suite is green: sql-staging.ts:28-32 creates the roles but
+    not the grants. phase6-sql.test.ts:246-279 asserts a property the platform
+    does not provide.
+
+  Why it matters on a public news site (the publishable/anon key is shipped in
+  the JS bundle by design):
+    - trigger_auto_publish('morning') / newsroom_trigger('auto-publish') →
+      a full edition run with the Vault secret attached: publishing plus LLM
+      spend, triggered by any visitor.
+    - prune_automation_tables() → deletes retention rows.
+    - claim_ingested_items() / record_alert() → queue disruption, alert spam.
+  PostgREST exposes every public function the caller may execute, so these are
+  reachable as POST /rest/v1/rpc/<name>.
+
+  FIX (to be implemented):
+    - new migration: for each function,
+        revoke all on function … from public, anon, authenticated;
+        grant execute on function … to service_role;
+      (keep the existing PUBLIC revoke; service_role is required for the
+      edge functions, and currently only has it via default privileges).
+    - sql-staging.ts: apply Supabase's default privileges in the prelude so the
+      harness matches the platform.
+    - phase6-sql.test.ts: keep the assertion, now meaningful; add a case that
+      fails if a future function forgets the explicit revoke.
+  [LIVE] Confirmation query (run before/after; expected: every row FALSE and
+  no `anon=` / `authenticated=` entry):
+    select p.proname, p.proacl
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.prosecdef
+     order by 1;
+
+FAIL F3 — the cron URL falls back to the OLD project, and the docs describe an
+          allow-list that does not exist
+          [REPO]                                              Severity: high
+
+  supabase/migrations/20261016090100_phase6_autonomy_crons.sql:67
+    base := coalesce(base, 'https://ruusbjlabbojpbawbphc.supabase.co');
+  supabase/migrations/20261015120200_reschedule_auto_publish_18_per_day.sql:67,115,154
+    hardcoded old-project URLs inside the Phase 5 trigger functions (replaced
+    later in the chain by newsroom_trigger, so only the file content matters).
+  docs/OPERATIONS.md:110 claims "Every targeted function name is rejected if it
+    is not in the migration's allow-list" — there is no validation anywhere;
+    newsroom_trigger concatenates p_function into the URL path unchecked
+    (migration line 31). A caller can address any path under /functions/v1/.
+  phase6_activation_checklist.txt:248-250 calls newsroom_base_url "a
+    convenience, not a requirement" — on the new project it is the opposite.
+
+  Consequence on the new project: the six safe jobs start immediately after
+  the push (ingest every 20 min, trend-watch, monitor, prunes). If
+  `newsroom_base_url` is missing, all of them POST to the OLD project with the
+  NEW secret (guaranteed 401 there, zero ingestion here). The old project is
+  then also receiving traffic from a second project.
+
+  FIX:
+    - remove the fallback; raise an exception when the Vault row is absent so
+      the run fails loudly instead of silently hitting a foreign host;
+    - either implement the allow-list for p_function or delete the claim;
+    - phase6-sql.test.ts:594 currently asserts the old URL
+      (…:591-594) — replace with two cases: correct URL when the row exists,
+      error when it does not;
+    - make Vault creation step C3 mandatory and move it BEFORE `db push`.
+
+FAIL F4 — the migration chain is not fail-closed from the first file
+          [REPO] + [PLATFORM]                                 Severity: low
+
+  20260503120747_…sql:7-20 creates `auto-publish-every-4h` ACTIVE, targeting
+  gjmmnqtfvnjlwzqwzrzu (a third, foreign project) with an embedded anon JWT.
+  20261015120200_…sql:88-90,130,168 creates 5 more jobs ACTIVE, targeting
+  ruusbjlabbojpbawbphc. Only 20261016090100 (section 2) unschedules and
+  recreates them inactive.
+
+  [PLATFORM] supabase/cli applies files one at a time with no transaction
+  wrapper: apps/cli-go/pkg/migration/apply.go:62-75 loops per file and calls
+  ExecBatch (pkg/migration/file.go:121). Earlier files are therefore committed
+  and visible to pg_cron before later files run.
+
+  Impact on a fresh install of the NEW project: at worst a stray HTTP POST to
+  the old/foreign projects during the push (401, or 404) — no job targets the
+  new project until migration 6, and its functions are not deployed yet. The
+  "nothing active before preflight" invariant is nevertheless not literally
+  true. Recommendation: keep the historical migrations as records (repo
+  policy: applied migrations are history) and document this window; a squash
+  is only worth it if you want the invariant to be literal.
+
+FAIL F5 — four documentation statements that are false today
+          [REPO]                                              Severity: low
+
+  a) phase6_activation_checklist.txt:280 says `.env` is "gitignored" — it is
+     TRACKED in git (git ls-files .env) and contains the old project's URL and
+     anon key. Updating it is a normal commit, not a local-only change.
+  b) phase6_activation_checklist.txt:49 says ruusbjlabbojpbawbphc is "the
+     repo's only project ref" — gjmmnqtfvnjlwzqwzrzu is also present, and this
+     audit introduces a third.
+  c) docs/OPERATIONS.md:110 allow-list claim (see F3).
+  d) docs/OPERATIONS.md:97-98 / phase6_activation_checklist.txt:248 describe
+     newsroom_base_url as optional (see F3).
+
+--------------------------------------------------------------------------------
+PASS — verified, no action needed for the move
+--------------------------------------------------------------------------------
+
+PASS P1 — Front-end client is project-agnostic
+  src/integrations/supabase/client.ts:4-6 reads only VITE_SUPABASE_URL and
+  VITE_SUPABASE_PUBLISHABLE_KEY. No hardcoded host anywhere in src/.
+  (VITE_SUPABASE_PROJECT_ID exists in .env:1 but is read by no code — dead
+  variable, decide whether to keep or drop it.)
+
+PASS P2 — No Supabase Auth surface to migrate
+  Zero uses of supabase.auth / signIn / getSession in src/ (grep: 0), no
+  auth.uid()/auth.role() in any migration. There are no user accounts, no
+  redirect allowlist, no email templates and no JWT expiry setting to carry
+  over. "Authentication" here means: RLS for reads + the shared automation
+  secret for write endpoints.
+
+PASS P3 — Migration set is ordered, idempotent and PG 17 compatible
+  13 files, strictly increasing timestamps; re-apply is tested
+  (phase6-sql.test.ts:76-94). No PG-18-only construct (uuidv7, MERGE,
+  RETURNING OLD/NEW, virtual generated columns: none). Only gen_random_uuid(),
+  md5(), jsonb, date_trunc(), on conflict — all fine on 17.11.
+  `create extension if not exists pg_cron / pg_net / pgcrypto` is allowed for
+  the `postgres` role on Supabase: all three are in
+  supautils.privileged_extensions (ansible/files/postgresql_config/
+  supautils.conf.j2:10).
+
+PASS P4 — pg_cron creation API is available to `postgres`
+  cron.schedule / cron.schedule_in_database / cron.unschedule / cron.alter_job
+  are functions in schema cron; Supabase grants all functions in that schema to
+  postgres with grant option ([PLATFORM] pg_cron/after-create.sql:2-3,
+  re-applied by extensions.grant_pg_cron_access()). The fail-closed creation
+  (`schedule_in_database(…, active := false)`) is therefore executable, and
+  jobs get username = `postgres`, which the alter_job ownership filter accepts.
+
+PASS P5 — Vault and pg_net grants are in place for `postgres`
+  [PLATFORM] supabase_vault/after-create.sql grants USAGE + SELECT on
+  vault.secrets/vault.decrypted_secrets + EXECUTE on vault.create_secret to
+  postgres; net.http_post is SECURITY DEFINER and granted to postgres, anon,
+  authenticated, service_role (init-scripts/…0003-post-setup.sql:72-81). The
+  trigger functions will work once F1/F3 are fixed.
+
+PASS P6 — RLS on data tables is correct on a real project
+  [LOCAL DEMO] with Supabase defaults: automation tables anon SELECT/INSERT
+  false; posts anon SELECT true, INSERT false. The per-role REVOKEs in
+  20261015120000 and 20261016090000 do name anon/authenticated explicitly, so
+  they are effective (unlike the function revokes in F2).
+
+PASS P7 — Edge functions: 13 directories, 13 config.toml entries
+  Every function has verify_jwt = false and authenticates itself with
+  requireSecret(); the three public feeds are intentionally anonymous. No
+  project-specific host is hardcoded: the feeds use SUPABASE_URL, and
+  breaking-news-monitor derives AUTO_PUBLISH_URL from SUPABASE_URL
+  (supabase/functions/breaking-news-monitor/index.ts:86-87).
+
+PASS P8 — SEO endpoints are generated, not hand-maintained
+  scripts/sync-seo-endpoints.mjs builds public/sitemap.xml and public/robots.txt
+  from VITE_SUPABASE_URL on every predev/prebuild; the committed copies still
+  point at the old project and will be regenerated by `npm run seo` (or any
+  build) after .env changes.
+
+PASS P9 — Repository baseline is green
+  At eb1b0f0: npx vitest run phase6-sql + repo-integrity + phase6-secrets
+  → 3 files, 56 tests, exit 0. Relevant to the plan: whatever is changed must
+  keep these green.
+
+--------------------------------------------------------------------------------
+BLOCKED — needs the live project (cannot be done from here)
+--------------------------------------------------------------------------------
+B1  The new project's actual ACLs and cron state: no egress to *.supabase.co,
+    no credentials. Every F1/F2 statement above is platform-source + local
+    reproduction, not a reading of xuqxautmflofkvbsaanh.
+B2  Any `supabase link`, `db push`, `functions deploy`, `secrets set` — needs
+    SUPABASE_ACCESS_TOKEN and the database password.
+B3  The OLD project's state (which migrations are recorded, whether its jobs
+    are live, whether F2 is already exploitable there). If Phase 6 was pushed
+    there, assume it is — check first.
+B4  Real feed reachability from ap-south-1, model output quality, provider
+    quotas (Unsplash/Pexels), Google indexing.
+B5  Content: the new project is EMPTY. Switching VITE_SUPABASE_URL without a
+    content plan will empty the live site, the sitemaps and the RSS feed.
+    This is a product decision, not a repository defect.
+B6  Whether the new project issues legacy JWT keys (anon/service_role) or the
+    new sb_publishable_/sb_secret_ keys, and whether SUPABASE_ANON_KEY is still
+    injected into edge functions in that case.
+
+--------------------------------------------------------------------------------
+NOT VERIFIED — reasoned, not proven
+--------------------------------------------------------------------------------
+N1  cron.alter_job under Supabase's ACLs. The harness stub is invoker-rights,
+    so the local probe showed "permission denied" for it too; real pg_cron
+    switches to the extension owner (source above). Live check needed.
+N2  pg_cron version on the new project. schedule_in_database and alter_job need
+    ≥ 1.4; Supabase ships 1.6.x on PG 17, but `select extversion` was not run.
+N3  If the project uses new-format API keys, supabase-js still works with the
+    publishable key, but the three feed functions read SUPABASE_ANON_KEY
+    explicitly (sitemap/index.ts:14, news-sitemap:12, rss:18). If that variable
+    is not injected, the feeds return empty/500. Check with `supabase secrets
+    list` and one request.
+N4  Exact statement-level transaction semantics inside one migration batch.
+    Conclusion does not depend on it: files are separate batches, which is
+    enough for F4.
+N5  Whether the 13 functions bundle/deploy cleanly against the new project
+    (esm.sh imports) — standard, but not exercised here.
+
+--------------------------------------------------------------------------------
+3. OLD-PROJECT REFERENCE INVENTORY (exact)
+--------------------------------------------------------------------------------
+27 occurrences of ruusbjlabbojpbawbphc in 12 files (+9 of the older foreign
+ref gjmmnqtfvnjlwzqwzrzu).
+
+MUST CHANGE (integration):
+  .env:1,3                                   old project id + URL (TRACKED)
+  supabase/config.toml:1                     project_id
+  public/robots.txt:51,52                    regenerated from .env
+  public/sitemap.xml:5,9                     regenerated from .env
+  docs/ci-workflow.pending.yml:64            CI fallback default URL
+  supabase/migrations/20261016090100:67      hardcoded fallback (F3 defect)
+  src/test/phase6-sql.test.ts:594            asserts the old URL (F3 fix)
+
+MUST CHANGE (operator docs, to the new ref — no secrets in them):
+  phase6_activation_checklist.txt:4,49,92,248,316,318,460
+  phase6_1_summary.txt:353
+  phase6_summary.txt:235
+  docs/OPERATIONS.md:110 (allow-list claim), 97-98 (optional wording)
+
+LEAVE AS HISTORY (do not rewrite applied migrations):
+  supabase/migrations/20260503120747_…:12    foreign ref + embedded anon JWT
+  supabase/migrations/20261015120200_…:67,115,154   old-project URLs
+  REPO_ANALYSIS.md:140-142,256               historical audit snapshot
+
+--------------------------------------------------------------------------------
+4. ENVIRONMENT VARIABLES AND SECRETS (names only — no values)
+--------------------------------------------------------------------------------
+FRONT-END BUILD (public by design):
+  VITE_SUPABASE_URL                 https://xuqxautmflofkvbsaanh.supabase.co
+  VITE_SUPABASE_PUBLISHABLE_KEY     new project's anon/publishable key
+  VITE_SITE_URL                     https://newssparkle.lovable.app (unchanged)
+  VITE_DEMO_MODE                    false
+  VITE_SUPABASE_PROJECT_ID          unused by code (optional)
+
+FUNCTION SECRETS (supabase secrets set):
+  AUTO_PUBLISH_SECRET    REQUIRED  must equal the Vault value
+  SITE_URL               REQUIRED  canonical origin for feeds/JSON-LD
+  LOVABLE_API_KEY        REQUIRED for writing (or OPENAI_API_KEY / AI_API_KEY)
+  AI_BASE_URL, AI_MODEL  optional  defaults api.openai.com/v1, gpt-4o-mini
+  CRON_SECRET            optional  legacy alias, must equal the same secret
+  AUTO_PUBLISH_URL       optional  only breaking-news-monitor; defaults to
+                                   <SUPABASE_URL>/functions/v1/auto-publish
+  UNSPLASH_ACCESS_KEY    optional  image quality
+  PEXELS_API_KEY         optional  image fallback
+  GNEWS_API_KEY / NEWSAPI_KEY / SERPAPI_KEY  DO NOT SET — no code reads them
+
+VAULT (SQL, in the new project):
+  auto_publish_secret    REQUIRED  same value as AUTO_PUBLISH_SECRET
+  newsroom_base_url      REQUIRED after the F3 fix
+                                   https://xuqxautmflofkvbsaanh.supabase.co
+
+PLATFORM-INJECTED (verify, do not set manually unless missing):
+  SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+
+CLI / DASHBOARD (never in the repo):
+  SUPABASE_ACCESS_TOKEN (or `supabase login`), database password, host build
+  environment variables.
+
+Nothing in the list is missing from the repo's documentation: .env.example
+already names every function variable, and phase6-secrets.test.ts asserts that
+it stays that way.
+
+--------------------------------------------------------------------------------
+5. ORDERED MIGRATION AND DEPLOYMENT PLAN (for approval; do not run yet)
+--------------------------------------------------------------------------------
+PHASE 0 — repository fixes (one commit, all tests green)
+  0.1 Replace the gate statement with cron.alter_job in cron-contract.ts, both
+      Phase 6 migration files, the checklist and OPERATIONS.md (F1).
+  0.2 New migration: explicit function grants for the 10 Phase 6 functions
+      (revoke anon/authenticated, grant service_role) (F2).
+  0.3 Remove the newsroom_base_url fallback; raise when absent (F3); update
+      phase6-sql.test.ts:591-594 and the docs.
+  0.4 Harness: model Supabase default privileges (F2) and cron.job ACL +
+      SECURITY DEFINER alter_job stub (F1); rerun the whole suite.
+  0.5 Docs: new project ref, mandatory Vault step before push, .env tracking
+      note, allow-list claim, transient-window note (F5).
+
+PHASE 1 — read-only preflight on the new project (safe)
+  supabase link --project-ref xuqxautmflofkvbsaanh
+  select version();                                              -- 17.11
+  select extversion from pg_extension where extname = 'pg_cron'; -- expect >= 1.6
+  select grantee, privilege_type from information_schema.role_table_grants
+   where table_schema='cron' and table_name='job' and grantee='postgres';
+   -- expect SELECT only (confirms F1 and the fix's premise)
+  select name from vault.secrets;                                 -- expect empty
+  Check the API key format in the dashboard (B6) and that the three feed
+  functions will get SUPABASE_ANON_KEY (N3).
+
+PHASE 2 — Vault secrets BEFORE the push (new order; removes the F3 window)
+  select vault.create_secret('<openssl rand -hex 32>', 'auto_publish_secret', …);
+  select vault.create_secret('https://xuqxautmflofkvbsaanh.supabase.co',
+                             'newsroom_base_url', …);
+
+PHASE 3 — migrations
+  supabase db push            -- 13 migrations, 0 errors
+  select jobname, schedule, active from cron.job order by 1;
+    -- 14 rows: 8 inactive (gated) / 6 active (safe), schedules unchanged
+  select count(*) filter (where active) a, count(*) filter (where not active) i
+    from cron.job;            -- 6 / 8
+  Re-run `supabase db push` once: no changes, still 6/8 (idempotency).
+
+PHASE 4 — functions
+  npm run check:functions && supabase functions deploy
+  supabase secrets set AUTO_PUBLISH_SECRET=<same value> SITE_URL=https://newssparkle.lovable.app LOVABLE_API_KEY=<key>
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+    https://xuqxautmflofkvbsaanh.supabase.co/functions/v1/ingest-feeds -d '{}'   # 401
+  curl … /functions/v1/phase6-monitor -H "Authorization: Bearer $SECRET"          # ok:true
+  (Safe: publishing jobs are inactive; the monitor only reads.)
+
+PHASE 5 — front end (only when the content decision is made)
+  Update .env (3 VITE_ values) → npm run seo → npm run verify → deploy dist.
+  Verify the new sitemap.xml/robots.txt contain the new ref; fetch
+  /functions/v1/sitemap, news-sitemap and rss on the new host.
+
+PHASE 6 — dry run and gradual activation (existing G1/G2/G3, unchanged order)
+  ingest → write-desk → one manual release → G1 (write+publish) → 24h → G2
+  (editions + alerts) → B3 archive pre-check → G3 (maintenance). Maintenance
+  stays inactive until explicitly approved; publishing stays invisible to
+  readers until the front-end cutover in Phase 5.
+
+Note: if the old project still serves production, pause its cron jobs before
+Phase 6 so two databases cannot publish in parallel (B3).
+
+--------------------------------------------------------------------------------
+6. RISKS, PREREQUISITES, ROLLBACK
+--------------------------------------------------------------------------------
+RISKS
+  R1  Pushing before the Phase 0 fixes: db push aborts mid-chain, or the gate
+      "succeeds" only because nobody checked the ACL. Do not skip Phase 0.
+  R2  F2 is live on any project that already ran Phase 6: check the old project
+      first with the proacl query; if anon has EXECUTE, treating it as urgent
+      is correct.
+  R3  Empty new database: switching the front end empties the site and the
+      feeds; Google can drop pages. Decide: content migration, or keep the old
+      project live until the pipeline has filled the new one.
+  R4  Two live projects with cron = two publishers. Pause the old one.
+  R5  If newsroom_base_url is missing (pre-fix fallback), the new project's
+      jobs call the old project. Phase 2 ordering removes the window.
+  R6  New API key format (B6/N3) can break the three public feed functions.
+
+PREREQUISITES
+  Supabase access token + database password; the new project's publishable key;
+  one generated automation secret; an AI key; a content decision.
+
+ROLLBACK
+  Cron: the gate is the default state.
+        select cron.alter_job(jobid, active := false) from cron.job;  -- all off
+        select cron.unschedule(jobname) from cron.job;                 -- delete
+  Database: Phase 6 migrations are additive; no table is dropped and no post is
+        rewritten. Removing the new project is the clean rollback (destructive,
+        needs your approval).
+  Front end: revert the three VITE_ values and redeploy; the old project is
+        untouched by this plan.
+  Functions: redeploy the previous commit; secrets are project-scoped and do
+        not leak into the repository.
+
+--------------------------------------------------------------------------------
+7. TEST PLAN
+--------------------------------------------------------------------------------
+Repository (must pass before Phase 1, and again after Phase 0):
+  npm run verify            # typecheck + lint + vitest + build
+  npm run check:functions   # 13 entrypoints on real Deno
+  New/updated tests:
+    - anon and authenticated cannot execute any public SECURITY DEFINER
+      function, WITH Supabase's default privileges modelled in the harness;
+    - the gate uses cron.alter_job, and executes against a role that has only
+      SELECT on cron.job (proves F1 stays fixed);
+    - the migration contains no "update cron.job";
+    - newsroom_trigger raises when newsroom_base_url is absent, and targets the
+      stored value when present;
+    - docs contain no old project ref (extend the existing repo-integrity
+      guarantees).
+Live (Phase 1-6):
+  the SQL checks in Phases 1/3; the 401 and monitor calls in Phase 4; the feed
+  URLs after Phase 5; the dry run and the 8/6 counts after Phase 6.
+
+--------------------------------------------------------------------------------
+8. WHAT I DID NOT DO
+--------------------------------------------------------------------------------
+No file in the repository was modified (temporary local probe deleted; git
+status clean). No Supabase command was run: no link, no db push, no migration,
+no deploy, no secret or Vault change, no cron enable/disable, no publishing
+trigger, no production query. main was not touched. No credential was read or
+printed. The old project was not inspected (BLOCKED).
+
+AWAITING APPROVAL before any Phase 0 change.
