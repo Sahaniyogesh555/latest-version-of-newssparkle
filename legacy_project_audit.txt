@@ -1,0 +1,340 @@
+================================================================================
+NEWSSPARKLE — SUPABASE CONNECTOR VERIFICATION & LEGACY PROJECT AUDIT
+================================================================================
+Date            : 2026-10-17
+Commit          : 56b23dcfd5048bb603ead7b89d7caf6608c90037
+Branch          : arena/e59698ee-latest-version-of-newssparkle
+Account org     : eofvbpczuzecrzavxphx  ("sahaniyogesh287@gmail.com's Org")
+Mode            : READ ONLY. Every SQL statement below is a SELECT on catalogs.
+                  No migration, no DDL, no DML, no extension created, no
+                  function deployed, no cron job touched, no secret written.
+                  Working tree unmodified apart from this report.
+
+--------------------------------------------------------------------------------
+OVERALL STATUS
+--------------------------------------------------------------------------------
+  Legacy project audit          : BLOCKED  (project is not in the account)
+  New project inventory         : PASS     (completed, read-only)
+  Migration readiness verdict   : CONDITIONAL — one unverifiable precondition
+
+  ruusbjlabbojpbawbphc cannot be audited because it no longer exists in any
+  organization this account can see. It is not a permissions problem on our
+  side: the project is absent from the authoritative project list.
+
+--------------------------------------------------------------------------------
+1. CONNECTOR VERIFICATION
+--------------------------------------------------------------------------------
+1.1 Connector state
+    Connector "supabase" reported: enabled (previously: disconnected).
+    validate_credential -> {"success": true, "message": "Credentials are valid.
+    Successfully connected to Supabase API."}
+
+1.2 Organizations the account belongs to  (list_organizations)
+    id = eofvbpczuzecrzavxphx, name = "sahaniyogesh287@gmail.com's Org",
+    slug = eofvbpczuzecrzavxphx
+    -> exactly one organization. No second org to search for the legacy project.
+
+1.3 Projects visible  (list_projects, called twice, identical both times)
+    Name              Ref                    Region      Status           Created
+    Hamro Sikai App   gmhcrlbqivqlswzgocyu   ap-south-1  INACTIVE         2025-06-23
+    NewsSparkle       xuqxautmflofkvbsaanh   ap-south-1  ACTIVE_HEALTHY   2026-10-16
+
+    -> "Hamro Sikai App" is a different application (Postgres 17.4.1.043),
+       not an earlier NewsSparkle project.
+    -> "NewsSparkle" is the new target, created 2026-10-16, Postgres 17.11.0.003.
+
+--------------------------------------------------------------------------------
+2. LEGACY PROJECT ruusbjlabbojpbawbphc — NOT ACCESSIBLE
+--------------------------------------------------------------------------------
+Evidence, in the order collected:
+
+  a) list_projects  -> the ref is absent from both calls. The account sees two
+     projects, neither of which is ruusbjlabbojpbawbphc.
+
+  b) get_project('ruusbjlabbojpbawbphc') ->
+     Authentication failed (403). Do not repeat this exact call.
+     (For a project the account cannot see, the Management API returns the same
+     403 as for a project that does not exist; combined with (a) and (c) the
+     only consistent reading is that it is not present for this account.)
+
+  c) DNS from this sandbox:
+       ruusbjlabbojpbawbphc.supabase.co  -> NXDOMAIN (no A/AAAA record)
+       xuqxautmflofkvbsaanh.supabase.co  -> 172.64.149.246 (resolves)
+     Supabase removes the project hostname when a project is deleted or paused.
+
+Exact error to quote to the owner:
+    "Authentication failed (403)" on get_project, plus the ref's total absence
+    from list_projects and NXDOMAIN on its hostname.
+
+Which account/organization needs authorization:
+    Either (i) ruusbjlabbojpbawbphc was deleted, in which case no authorization
+    can restore it and the audit is impossible by definition, or
+    (ii) it lives in a DIFFERENT Supabase account/organization than
+    eofvbpczuzecrzavxphx. If so, the owner must connect that account (or invite
+    this user to that org); nothing in this session can reach it.
+
+What the owner should check first (dashboard, not SQL):
+    Organization -> Projects -> include paused/deleted. A soft-deleted project
+    appears in the org's deleted list for a limited retention window; only the
+    owner can see it.
+
+Consequence for planning:
+    No table list, column list, row counts, migration history, function
+    inventory, extension list, RLS policy list, Edge Function list or cron
+    inventory can be produced for the legacy project. Every one of those
+    remains UNKNOWN, not "empty".
+
+--------------------------------------------------------------------------------
+3. NEW PROJECT INVENTORY — xuqxautmflofkvbsaanh (executed, read-only)
+--------------------------------------------------------------------------------
+3.1 Project
+    name            NewsSparkle
+    ref             xuqxautmflofkvbsaanh
+    org             eofvbpczuzecrzavxphx
+    region          ap-south-1
+    status          ACTIVE_HEALTHY
+    database        db.xuqxautmflofkvbsaanh.supabase.co, Postgres 17.11.0.003
+    created         2026-10-16T11:01:25Z
+    health          auth, db, db_postgres_user, pooler, realtime, rest, storage,
+                    pg_bouncer -> all ACTIVE_HEALTHY
+
+3.2 Session
+    current_user / session_user = postgres
+    current_database            = postgres
+    postgres is superuser       = false   (rolsuper=false, rolbypassrls=true)
+
+3.3 Tables
+    information_schema.tables for public/vault/cron/net returns:
+      vault.decrypted_secrets  (VIEW)
+      vault.secrets            (BASE TABLE)
+    -> public schema contains ZERO tables. The migrations have never run.
+
+3.4 Article and category counts
+    public.posts and public.categories DO NOT EXIST on the new project.
+    Row counts: not applicable (no table). Nothing to migrate into it.
+
+3.5 Migration history
+    list_migrations -> {"items": []}      (0 applied)
+    The repository has 14 migration files. 0 of 14 applied.
+
+3.6 Functions
+    pg_proc in public/cron/net -> zero rows.
+    vault functions that exist: create_secret(text,text,text,uuid),
+    update_secret(uuid,text,text,text,uuid), _crypto_aead_det_*.
+    -> no application functions, no cron functions, no net functions.
+
+3.7 Extensions
+    pg_stat_statements 1.11   extensions   owner postgres
+    pgcrypto           1.3    extensions   owner postgres
+    plpgsql            1.0    pg_catalog   owner supabase_admin
+    supabase_vault     0.3.1  vault        owner supabase_admin
+    uuid-ossp          1.1    extensions   owner postgres
+    pg_cron  -> NOT INSTALLED   (available 1.6.4)
+    pg_net   -> NOT INSTALLED   (available 0.20.4)
+
+3.8 Schemas present
+    auth, extensions, public, storage, vault
+    cron -> absent (created by pg_cron)
+    net  -> absent (created by pg_net)
+    supabase_migrations -> absent (no CLI push yet)
+
+3.9 RLS
+    No application tables exist, therefore no policies.
+    pg_publication: supabase_realtime exists with 0 member tables.
+
+3.10 Edge Functions
+     list_edge_functions -> {"items": []}   (none deployed)
+
+3.11 Scheduled jobs
+     cron.job does not exist; pg_cron is not installed.
+     Scheduled-job metadata: none. No job can be running.
+
+3.12 Vault contents (names only, values never read)
+     select name from vault.secrets -> 0 rows.
+     -> checklist prerequisites C1 (auto_publish_secret) and C3
+        (newsroom_base_url) are NOT done.
+
+3.13 Roles
+     anon            nologin, not superuser
+     authenticated   nologin, not superuser
+     service_role    nologin, bypassrls
+     postgres        login, NOT superuser, bypassrls
+     supabase_admin  login, SUPERUSER
+     -> exactly the model the repository assumes.
+
+--------------------------------------------------------------------------------
+4. MIGRATION-CRITICAL PRECONDITIONS (the reason this audit mattered)
+--------------------------------------------------------------------------------
+4.1 pg_cron version support                        PASS (available)
+    pg_available_extensions: pg_cron default_version = 1.6.4, installed = null.
+    1.6.4 >= 1.4, so cron.alter_job and cron.schedule_in_database will exist.
+    (A fresh CREATE EXTENSION pg_cron at 1.6 runs pg_cron--1.0.sql then the
+     1.0->1.1->...->1.6 upgrade chain; alter_job is added by
+     pg_cron--1.3--1.4.sql and REVOKEd from PUBLIC there. Verified against
+     citusdata/pg_cron v1.6.4 source and its Makefile.)
+
+4.2 postgres may create pg_cron at all                PASS
+    supautils.privileged_extensions includes both "pg_cron" and "pg_net", so a
+    non-superuser CREATE EXTENSION is intercepted and executed as supabase_admin
+    (supautils.superuser = supabase_admin).
+    supautils.extensions_parameter_overrides = {"pg_cron":{"schema":"pg_catalog"}}
+    -> the migration's plain `create extension if not exists pg_cron;` lands in
+    pg_catalog as pg_cron requires.
+
+4.3 Runtime preconditions for the cron worker         PASS
+    cron.database_name        = postgres   (== current_database, so the base
+                                            script's guard will not raise)
+    shared_preload_libraries  includes pg_cron AND pg_net
+    cron.use_background_workers = off (platform default; jobs still scheduled)
+
+4.4 Grant path for cron functions                     RISK — NOT VERIFIABLE
+    Event triggers present and enabled ('O'):
+      issue_pg_cron_access  -> extensions.grant_pg_cron_access()
+      issue_pg_net_access   -> extensions.grant_pg_net_access()
+    Both owned by supabase_admin, on ddl_command_end.
+
+    The DEPLOYED definition of grant_pg_cron_access() was read on the target
+    (pg_get_functiondef). It does, in this order:
+      grant usage on schema cron to postgres with grant option;
+      alter default privileges in schema cron grant all on tables/functions/
+        sequences to postgres with grant option;
+      alter default privileges for user supabase_admin in schema cron ... ;
+      grant all privileges on all TABLES in schema cron to postgres;
+      revoke all on table cron.job from postgres;
+      grant select on table cron.job to postgres with grant option;
+      revoke trigger on cron.job_run_details from postgres;
+
+    It does NOT contain `grant all on all functions in schema cron to postgres`.
+    The ALTER DEFAULT PRIVILEGES lines only affect functions created LATER;
+    alter_job and schedule_in_database are created during the same CREATE
+    EXTENSION, before the trigger runs. Both are explicitly REVOKEd from PUBLIC
+    by pg_cron itself.
+
+    Therefore EXECUTE for `postgres` on cron.alter_job / cron.schedule_in_database
+    must come from the supautils after-create hook:
+      /etc/postgresql-custom/extension-custom-scripts/pg_cron/after-create.sql
+    which contains exactly
+      grant usage on schema cron to postgres with grant option;
+      grant all on all functions in schema cron to postgres with grant option;
+
+    Supporting evidence that this hook works on this project:
+      * supautils.extension_custom_scripts_path =
+        supautils.privileged_extensions_custom_scripts_path =
+        /etc/postgresql-custom/extension-custom-scripts
+      * that is the path supabase/postgres Dockerfile-17 line 135 copies the
+        scripts into
+      * the project is Supabase Cloud (api.supabase.com, ap-south-1), not the
+        CLI Docker runtime that supabase/cli#6978 reports as broken
+      * INDIRECT PROOF the hook runs here: postgres currently holds
+        SELECT on vault.decrypted_secrets and vault.secrets, and EXECUTE on
+        vault.create_secret(text,text,text,uuid) — exactly the grants that
+        supabase_vault/after-create.sql makes, and which nothing else grants.
+
+    Why it is still "not verified": the function does not exist yet, so
+    has_function_privilege cannot be evaluated. Proving it requires creating
+    pg_cron, which is a mutation and is out of bounds for this audit.
+
+    Impact if the hook did not run: `db push` aborts at 20261015120200
+    (schedule_in_database) or 20261016090100 section 3b (alter_job) with
+    "permission denied for function". Fail-closed: the gate has not run, but no
+    publishing job was ever active either.
+
+4.5 Default privileges for new public functions       CONFIRMED (finding F2)
+    pg_default_acl on this project:
+      grantor supabase_admin, schema public, obj_type f (function):
+        {postgres=X/supabase_admin, anon=X/supabase_admin,
+         authenticated=X/supabase_admin, service_role=X/supabase_admin}
+      grantor postgres, schema public, obj_type f:
+        {postgres=X/postgres, anon=X/postgres,
+         authenticated=X/postgres, service_role=X/postgres}
+
+    This is live, first-hand confirmation of audit finding F2: every new
+    function in public is executable by anon/authenticated/service_role at
+    creation time, and `revoke ... from public` does NOT remove those grants.
+    The Phase 0/1da5872 per-file revokes are necessary and correctly targeted.
+
+4.6 Schema privileges                                  PASS
+    postgres: CREATE + USAGE on public and on extensions.
+
+4.7 vault.create_secret signature                      PASS
+    Deployed: vault.create_secret(new_secret text, new_name text,
+      new_description text, new_key_id uuid) with pronargdefaults = 3.
+    The checklist's 3-argument call resolves. No change needed.
+
+4.8 Other prerequisites
+    publication supabase_realtime        present (0 tables)
+    pgcrypto                             present in extensions
+    storage / auth schemas               present (platform defaults)
+    roles anon/authenticated/service_role present
+
+--------------------------------------------------------------------------------
+5. COMPARISON WITH THE GITHUB REPOSITORY (no files changed)
+--------------------------------------------------------------------------------
+  Item                          Repository                          Live (new project)          Match
+  ----------------------------  ----------------------------------  --------------------------  -----
+  Target ref in docs            xuqxautmflofkvbsaanh                xuqxautmflofkvbsaanh        YES
+  supabase/config.toml ref      ruusbjlabbojpbawbphc  (legacy)      xuqxautmflofkvbsaanh        NO
+  .env project id / URL          ruusbjlabbojpbawbphc  (legacy)      xuqxautmflofkvbsaanh        NO
+  .env publishable key          anon JWT, ref ruusbjlabbo…            -                           stale
+  Migrations in repo            14 files                             0 applied                   expected
+  Migration order               14 filenames by timestamp           nothing applied              n/a
+  pg_cron floor (>=1.4)         required                            1.6.4 available             YES
+  pg_net                        required                            0.20.4 available            YES
+  pgcrypto                      required                            installed 1.3               YES
+  supabase_realtime pub         required                            present                     YES
+  Default privileges (F2)       assumes EXECUTE to anon/auth/svc     CONFIRMED                   YES
+  postgres not superuser (F1)   assumes non-superuser                CONFIRMED                   YES
+
+  Discrepancies that matter:
+   D1. config.toml still points at the legacy (now non-existent) project. Any
+       `supabase link`/`db push` run from this checkout WITHOUT
+       `--project-ref xuqxautmflofkvbsaanh` would target a dead ref. The
+       documented command in docs/OPERATIONS.md does pass the ref explicitly.
+   D2. .env and its anon key are for the legacy project. A local build today
+       talks to a hostname that does not resolve. This is the documented
+       cutover step, not a defect introduced here.
+   D3. No blocker found between the repository's assumptions and the live
+       schema — the new project is a clean, empty, correctly configured target.
+
+  Not changed: config.toml, .env, migrations, docs, project refs. Nothing.
+
+--------------------------------------------------------------------------------
+6. WHAT REMAINS UNKNOWN
+--------------------------------------------------------------------------------
+  Legacy project (all UNKNOWN, none of it inferred):
+    existence, status, region, organization, tables, columns, row counts,
+    migration history, functions, extensions, RLS policies, Edge Functions,
+    cron jobs, secrets.
+
+  New project:
+    whether postgres gets EXECUTE on cron.alter_job / schedule_in_database
+    (4.4) — resolvable only by creating pg_cron, which needs approval.
+
+--------------------------------------------------------------------------------
+7. RECOMMENDED NEXT STEP
+--------------------------------------------------------------------------------
+  Decision the owner must make first: does any data in the legacy project need
+  to survive? The legacy project is not reachable from this account, so:
+    - if it was deliberately replaced by xuqxautmflofkvbsaanh, this migration
+      is greenfield and there is nothing to carry over;
+    - if data must be recovered, the owner must locate the project in its real
+      account or restore it from a backup/dump. That is outside this session.
+
+  If greenfield is confirmed, the new project is ready for a controlled push
+  with one caveat to watch:
+    1. (optional, needs approval) enable pg_cron from the dashboard and re-run
+       the check `has_function_privilege('postgres',
+       'cron.alter_job(bigint,text,text,text,text,boolean)','EXECUTE')`.
+       This removes the only remaining unknown before the push instead of
+       discovering it mid-chain.
+    2. create the two Vault secrets (auto_publish_secret, newsroom_base_url) —
+       currently 0 rows; C1-C3 of the checklist.
+    3. push the 14 migrations.
+    4. verify: 14 rows in schema_migrations, 8 inactive / 6 active jobs,
+       anon/authenticated executing only increment_post_views.
+
+  Nothing above was executed. No migration, no DDL, no DML, no deploy,
+  no secret, no cron change, no repository file modified.
+
+================================================================================
+END
