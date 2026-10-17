@@ -64,7 +64,24 @@ begin
     from vault.decrypted_secrets
    where name = 'newsroom_base_url';
 
-  base := coalesce(base, 'https://ruusbjlabbojpbawbphc.supabase.co');
+  -- FAIL CLOSED on the host. This used to fall back to a hard-coded project
+  -- URL, which meant a project without the Vault row silently sent its cron
+  -- traffic — with its own bearer token — to a different project. Guessing a
+  -- host is never correct: refuse to run instead. See the operator checklist
+  -- step C3 (the row is mandatory and is created before `db push`).
+  if base is null or base !~ '^https://[A-Za-z0-9._:-]+/?$' then
+    raise exception 'newsroom_base_url missing or invalid in Vault: refusing to send % to an unknown host', p_function;
+  end if;
+
+  -- Allow-list, not a concatenation. Only the functions this project actually
+  -- schedules can be addressed; anything else is a bug or an attacker.
+  if p_function not in (
+    'ingest-feeds', 'write-desk', 'publish-scheduler', 'trend-watch',
+    'maintenance', 'phase6-monitor', 'validate-feeds',
+    'auto-publish', 'breaking-news-monitor', 'notifications-dispatcher'
+  ) then
+    raise exception 'newsroom_trigger: % is not an approved function', p_function;
+  end if;
 
   if secret is null then
     raise warning 'auto_publish_secret missing from Vault — % will be rejected (401).', p_function;
@@ -181,12 +198,19 @@ select cron.schedule('phase6-monitor', '5,35 * * * *',
 
 -- ---------------------------------------------------------------------------
 -- 3b. The gate — the canonical statement, repeated identically in
---     20261016090200_phase6_activation_gate.sql, phase6_activation_checklist.txt
---     and docs/OPERATIONS.md. It is a no-op on a fresh install (the rows above
---     are already inactive); it repairs a project whose jobs were created
---     active by an earlier revision of this file.
+--     20261016090200_phase6_activation_gate.sql, 20261017090000_…, the
+--     operator checklist and docs/OPERATIONS.md. It is a no-op on a fresh
+--     install (the rows above are already inactive); it repairs a project
+--     whose jobs were created active by an earlier revision of this file.
+--
+--     It uses cron.alter_job, not `update cron.job`: Supabase grants the
+--     `postgres` role SELECT only on cron.job, so a direct UPDATE fails with
+--     "permission denied for table job" and would abort the whole push here.
+--     alter_job (pg_cron 1.4+) runs as the extension owner, changes only the
+--     argument you pass, and is granted to `postgres` by Supabase.
 -- ---------------------------------------------------------------------------
-update cron.job set active = false
+select cron.alter_job(jobid, active => false)
+  from cron.job
  where jobname in ('write-desk','publish-scheduler',
                    'auto-publish-morning','auto-publish-midday','auto-publish-evening',
                    'breaking-news-monitor','notifications-dispatcher',

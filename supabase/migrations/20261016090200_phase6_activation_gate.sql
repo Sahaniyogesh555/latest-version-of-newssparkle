@@ -12,6 +12,14 @@
 -- install it is a no-op, because 20261016090100 already creates the gate set
 -- inactive.
 --
+-- It uses cron.alter_job rather than `update cron.job`: Supabase grants the
+-- `postgres` role SELECT only on cron.job (supabase/postgres migration
+-- 20231020085357 plus the grant_pg_cron_access() event trigger), so a direct
+-- UPDATE fails with "permission denied for table job" — including in the SQL
+-- editor. alter_job (pg_cron 1.4+) runs as the extension owner, is granted to
+-- `postgres` by Supabase, and changes only the arguments supplied, so every
+-- schedule and command is left untouched.
+--
 -- What it does NOT do: it never enables anything, never changes a schedule or a
 -- command, and never touches the six jobs that are safe to run unattended.
 --
@@ -24,7 +32,8 @@
 -- Re-running it is free: the statement is idempotent.
 -- ============================================================================
 
-update cron.job set active = false
+select cron.alter_job(jobid, active => false)
+  from cron.job
  where jobname in ('write-desk','publish-scheduler',
                    'auto-publish-morning','auto-publish-midday','auto-publish-evening',
                    'breaking-news-monitor','notifications-dispatcher',
@@ -33,7 +42,7 @@ update cron.job set active = false
 -- ---------------------------------------------------------------------------
 -- Verification
 --     select jobname, schedule, active from cron.job order by jobname;
---       -> 14 rows: 8 inactive / 6 active
+--       -> 14 rows: 8 inactive / 6 active, schedules and commands unchanged
 --     select count(*) filter (where active) as active,
 --            count(*) filter (where not active) as inactive
 --       from cron.job;

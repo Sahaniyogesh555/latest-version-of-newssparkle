@@ -146,15 +146,37 @@ export function jobsInCategory(category: JobCategory): CronJobSpec[] {
  * indentation) in the migration, the checklist and docs/OPERATIONS.md.
  */
 export const GATE_SQL = [
-  "update cron.job set active = false",
+  "select cron.alter_job(jobid, active => false)",
+  "  from cron.job",
   " where jobname in ('write-desk','publish-scheduler',",
   "                   'auto-publish-morning','auto-publish-midday','auto-publish-evening',",
   "                   'breaking-news-monitor','notifications-dispatcher',",
   "                   'newsroom-maintenance');",
 ].join("\n");
 
+/**
+ * Why `cron.alter_job` and not `update cron.job set active = ...`:
+ *
+ * Supabase grants the `postgres` role SELECT only on `cron.job`
+ * (supabase/postgres 20231020085357_revoke_writes_on_cron_job_from_postgres.sql,
+ * re-applied by extensions.grant_pg_cron_access() when pg_cron is created).
+ * A direct UPDATE therefore fails with "permission denied for table job" and
+ * would abort `supabase db push` at this statement.
+ *
+ * cron.alter_job(job_id, schedule, command, database, username, active) is the
+ * supported API (pg_cron 1.4+, REVOKEd from public, granted by Supabase to
+ * `postgres`). It runs the UPDATE as the extension owner and only touches the
+ * arguments that are not NULL, so `active => false` flips the flag and leaves
+ * the schedule and command exactly as they are.
+ */
+export const GATE_RATIONALE =
+  "cron.alter_job is the supported API: postgres has SELECT only on cron.job.";
+
 /** Resume everything, including the safe jobs. */
-export const RESUME_ALL_SQL = "update cron.job set active = true;";
+export const RESUME_ALL_SQL = "select cron.alter_job(jobid, active => true) from cron.job;";
+
+/** Stop everything (ingestion and monitoring too) — reversible, deletes nothing. */
+export const STOP_ALL_SQL = "select cron.alter_job(jobid, active => false) from cron.job;";
 
 /** Human-readable expectation that both docs must state, and the test asserts. */
 export const GATE_EXPECTATION =
@@ -182,7 +204,7 @@ export const ACTIVATION_STEPS: ActivationStep[] = [
     id: "G1",
     enables: ["write-desk", "publish-scheduler"],
     sql: [
-      "update cron.job set active = true",
+      "select cron.alter_job(jobid, active => true) from cron.job",
       " where jobname in ('write-desk','publish-scheduler');",
     ].join("\n"),
     activeAfter: ["write-desk", "publish-scheduler"],
@@ -197,7 +219,7 @@ export const ACTIVATION_STEPS: ActivationStep[] = [
       "notifications-dispatcher",
     ],
     sql: [
-      "update cron.job set active = true",
+      "select cron.alter_job(jobid, active => true) from cron.job",
       " where jobname in ('auto-publish-morning','auto-publish-midday','auto-publish-evening',",
       "                   'breaking-news-monitor','notifications-dispatcher');",
     ].join("\n"),
@@ -215,7 +237,7 @@ export const ACTIVATION_STEPS: ActivationStep[] = [
     id: "G3",
     enables: ["newsroom-maintenance"],
     sql: [
-      "update cron.job set active = true",
+      "select cron.alter_job(jobid, active => true) from cron.job",
       " where jobname in ('newsroom-maintenance');",
     ].join("\n"),
     activeAfter: GATED_JOB_NAMES,
@@ -228,12 +250,19 @@ export function normaliseSql(sql: string): string {
 }
 
 /**
- * Extract every `update cron.job set active = <value> …;` statement from a
- * document, normalised. Used to prove that the migration and both docs contain
- * the same statements and no stray variations.
+ * Extract every `select cron.alter_job(jobid, active => <value>) …;` statement
+ * from a document, normalised. Used to prove that the migrations and both docs
+ * contain the same statements and no stray variations.
+ *
+ * `update cron.job set active = …` is deliberately NOT matched: that form is
+ * not executable by the role Supabase gives you, and repo-integrity fails if it
+ * appears anywhere.
  */
 export function extractActiveStatements(text: string, value: "true" | "false"): string[] {
-  const pattern = new RegExp(`update cron\\.job set active = ${value}[^;]*;`, "gi");
+  const pattern = new RegExp(
+    `select\\s+cron\\.alter_job\\(\\s*jobid\\s*,\\s*active\\s*=>\\s*${value}\\s*\\)[\\s\\S]*?;`,
+    "gi",
+  );
   return [...text.matchAll(pattern)].map((match) => normaliseSql(match[0]));
 }
 

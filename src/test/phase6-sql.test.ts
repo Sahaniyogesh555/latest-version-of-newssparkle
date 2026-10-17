@@ -18,8 +18,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { PGlite } from "@electric-sql/pglite";
 import {
   MIGRATIONS_DIR,
+  SUPABASE_PRELUDE,
   createStagingDb,
   migrationFiles,
   prepareMigrationSql,
@@ -43,6 +45,19 @@ const PHASE6_SCHEMA = "20261016090000_phase6_autonomy_schema.sql";
 const PHASE6_CRONS = "20261016090100_phase6_autonomy_crons.sql";
 const PHASE6_GATE = "20261016090200_phase6_activation_gate.sql";
 const CHECKLIST = join(process.cwd(), "phase6_activation_checklist.txt");
+
+/** A database that looks like a brand-new Supabase project, before migrations. */
+async function freshPlatformDb(): Promise<PGlite> {
+  const db = await PGlite.create();
+  await db.exec(SUPABASE_PRELUDE);
+  await db.exec(`do $$
+  begin
+    if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+      create publication supabase_realtime;
+    end if;
+  end $$;`);
+  return db;
+}
 
 /** The post statuses the app and the pipeline use (posts_status_check). */
 const VALID_STATUSES = ["draft", "review", "scheduled", "published", "rejected", "archived"];
@@ -244,6 +259,10 @@ describe("schema objects", () => {
   });
 
   it("locks down the RPCs: security definer with a fixed search_path, not executable by anon", async () => {
+    // The harness models Supabase's default privileges (EXECUTE granted to
+    // anon/authenticated at creation), which is what made the original
+    // `revoke ... from public` insufficient — audit finding F2. This test now
+    // fails if a new SECURITY DEFINER function forgets its explicit revoke.
     const functions = [
       "public.newsroom_trigger(text,jsonb,integer)",
       "public.claim_ingested_items(integer)",
@@ -252,6 +271,10 @@ describe("schema objects", () => {
       "public.newsroom_status()",
       "public.prune_automation_tables()",
       "public.record_alert(text,text,text,text,jsonb)",
+      "public.trigger_auto_publish(text)",
+      "public.trigger_breaking_news_monitor()",
+      "public.trigger_notifications_dispatcher()",
+      "public.prune_post_view_events()",
     ];
 
     for (const signature of functions) {
@@ -276,6 +299,72 @@ describe("schema objects", () => {
         expect(canExecute, `${role} must not execute ${signature}`).toBe(false);
       }
     }
+  });
+
+  it("grants each privileged function only to the role that calls it", async () => {
+    // service_role is what the edge functions use (they hold the service key).
+    const serviceRpc = [
+      "public.claim_ingested_items(integer)",
+      "public.category_published_count(text,timestamptz)",
+      "public.newsroom_llm_calls_today()",
+      "public.newsroom_status()",
+      "public.prune_automation_tables()",
+      "public.prune_post_view_events()",
+      "public.record_alert(text,text,text,text,jsonb)",
+    ];
+    for (const signature of serviceRpc) {
+      expect(
+        await scalar<boolean>(staging.db, `select has_function_privilege('service_role', $1, 'EXECUTE')`, [signature]),
+        `service_role must be able to call ${signature}`,
+      ).toBe(true);
+    }
+
+    // The HTTP triggers carry the Vault secret. The database's own cron role
+    // (postgres) runs them; no API role may.
+    for (const signature of [
+      "public.newsroom_trigger(text,jsonb,integer)",
+      "public.trigger_auto_publish(text)",
+      "public.trigger_breaking_news_monitor()",
+      "public.trigger_notifications_dispatcher()",
+    ]) {
+      for (const role of ["anon", "authenticated", "service_role"]) {
+        expect(
+          await scalar<boolean>(staging.db, `select has_function_privilege($1, $2, 'EXECUTE')`, [role, signature]),
+          `${role} must not be able to trigger ${signature}`,
+        ).toBe(false);
+      }
+      expect(
+        await scalar<boolean>(staging.db, `select has_function_privilege('postgres', $1, 'EXECUTE')`, [signature]),
+        `postgres runs ${signature} from pg_cron`,
+      ).toBe(true);
+    }
+
+    // The one deliberate public function: the view counter.
+    for (const role of ["anon", "authenticated", "service_role"]) {
+      expect(
+        await scalar<boolean>(
+          staging.db,
+          `select has_function_privilege($1, 'public.increment_post_views(text,text)', 'EXECUTE')`,
+          [role],
+        ),
+        `${role} may bump a view counter`,
+      ).toBe(true);
+    }
+  });
+
+  it("has no SECURITY DEFINER function reachable by the public roles except the view counter", async () => {
+    // Whole-catalog sweep, so a function added later without an explicit revoke
+    // cannot slip through.
+    const exposed = await rows<{ signature: string }>(
+      staging.db,
+      `select p.oid::regprocedure::text as signature
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.prosecdef
+          and (has_function_privilege('anon', p.oid, 'EXECUTE')
+               or has_function_privilege('authenticated', p.oid, 'EXECUTE'))
+        order by 1`,
+    );
+    expect(exposed.map((row) => row.signature)).toEqual(["increment_post_views(text,text)"]);
   });
 });
 
@@ -548,6 +637,110 @@ describe("cron schedule and the Vault trigger", () => {
     await staging.db.query(`update cron.job set active = true where jobname = any($1)`, [SAFE_JOB_NAMES]);
   });
 
+  it("uses the gate API the platform actually permits, not a direct UPDATE", async () => {
+    // Supabase gives `postgres` SELECT only on cron.job. A direct UPDATE is
+    // rejected by a role that only has what the platform grants (audit F1).
+    const db = await freshPlatformDb();
+    try {
+      await db.exec(`
+        do $$ begin
+          if not exists (select 1 from pg_roles where rolname = 'ops_deployer') then
+            create role ops_deployer nologin;
+          end if;
+        end $$;
+        grant usage on schema cron to ops_deployer;
+        grant select on table cron.job to ops_deployer;
+        set role ops_deployer;`);
+      await expect(
+        db.exec(`update cron.job set active = false where jobname = 'write-desk'`),
+        "a direct UPDATE on cron.job must be denied to a SELECT-only role",
+      ).rejects.toThrow(/permission denied/i);
+      await db.exec(`reset role`);
+    } finally {
+      await db.close();
+    }
+
+    // The replacement is an API call whose body runs as the extension owner,
+    // so EXECUTE is enough.
+    const meta = await rows<{ prosecdef: boolean; proacl: string | null }>(
+      staging.db,
+      `select prosecdef, proacl::text from pg_proc
+        where oid = 'cron.alter_job(bigint,text,text,text,text,boolean)'::regprocedure`,
+    );
+    expect(meta).toHaveLength(1);
+    expect(meta[0].prosecdef, "alter_job must be security definer").toBe(true);
+    expect(
+      await scalar<boolean>(staging.db, `select has_function_privilege('postgres', 'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE')`),
+      "Supabase grants cron functions to postgres",
+    ).toBe(true);
+
+    // No migration may reintroduce the unsupported form.
+    for (const file of migrationFiles()) {
+      const text = readMigration(file).replace(/--[^\n]*/g, "");
+      expect(text, `${file} must not UPDATE cron.job directly`).not.toMatch(/update\s+cron\.job/i);
+    }
+  });
+
+  it("the gate changes only `active`, never a schedule or a command", async () => {
+    const before = await rows<{ jobname: string; schedule: string; command: string }>(
+      staging.db,
+      `select jobname, schedule, command from cron.job where jobname = any($1) order by jobname`,
+      [ALL_JOBS.map((job) => job.name)],
+    );
+    await staging.db.exec(GATE_SQL);
+    const after = await rows<{ jobname: string; schedule: string; command: string }>(
+      staging.db,
+      `select jobname, schedule, command from cron.job where jobname = any($1) order by jobname`,
+      [ALL_JOBS.map((job) => job.name)],
+    );
+    expect(after).toEqual(before);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+  });
+
+  it("runs the gate on a project that has no jobs yet without failing", async () => {
+    // Fresh install: the repair migration is intentionally a no-op there.
+    const db = await freshPlatformDb();
+    try {
+      const { sql } = prepareMigrationSql(readMigration(PHASE6_GATE));
+      await expect(db.exec(sql)).resolves.not.toThrow();
+      expect(await scalar<number>(db, `select count(*)::int from cron.job`)).toBe(0);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("never leaves a publishing-capable job active at any point in the chain", async () => {
+    // `db push` commits one file at a time, so every prefix of the chain is a
+    // state a project can actually be left in (audit F4). The legacy
+    // migrations used to create publishing jobs ACTIVE.
+    const db = await freshPlatformDb();
+    try {
+      const observed: string[] = [];
+      for (const file of migrationFiles()) {
+        const { sql } = prepareMigrationSql(readMigration(file));
+        await db.exec(sql);
+        const snapshot = await rows<{ jobname: string | null; active: boolean }>(
+          db,
+          `select jobname, active from cron.job where active order by jobname`,
+        );
+        const activeNames = snapshot.map((row) => row.jobname ?? "(unnamed)");
+        observed.push(`${file}: ${activeNames.join(",") || "(none)"}`);
+        for (const name of activeNames) {
+          expect(
+            SAFE_JOB_NAMES,
+            `${file} left ${name} active — only ingestion/monitoring/retention may run before preflight`,
+          ).toContain(name);
+        }
+      }
+      // End state: exactly the six safe jobs.
+      const final = await rows<{ jobname: string }>(db, `select jobname from cron.job where active order by jobname`);
+      expect(final.map((row) => row.jobname)).toEqual([...SAFE_JOB_NAMES].sort());
+      expect(observed.length).toBe(migrationFiles().length);
+    } finally {
+      await db.close();
+    }
+  });
+
   it("replaces the previous schedule rather than stacking a second one", async () => {
     // The migration unschedules the Phase 5 job names first; a re-run must not
     // leave two jobs pointing at the same function.
@@ -578,6 +771,10 @@ describe("cron schedule and the Vault trigger", () => {
   it("posts to the right URL with the Vault secret and never logs the value", async () => {
     const secretValue = "test-secret-value-not-a-real-credential";
     await staging.db.exec(`select vault.create_secret('${secretValue}', 'auto_publish_secret', 'staging test')`);
+    // F3: the host is mandatory and comes from Vault — there is no fallback.
+    await staging.db.exec(
+      `select vault.create_secret('https://audit-probe.supabase.co', 'newsroom_base_url', 'staging test')`,
+    );
 
     const requestId = await scalar<bigint>(
       staging.db,
@@ -591,7 +788,7 @@ describe("cron schedule and the Vault trigger", () => {
       [Number(requestId)],
     );
     expect(captured).toHaveLength(1);
-    expect(captured[0].url).toBe("https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/write-desk");
+    expect(captured[0].url).toBe("https://audit-probe.supabase.co/functions/v1/write-desk");
     expect(captured[0].headers["Content-Type"]).toBe("application/json");
     expect(captured[0].headers.Authorization).toBe(`Bearer ${secretValue}`);
     expect(captured[0].body).toEqual({ limit: 1 });
@@ -602,6 +799,48 @@ describe("cron schedule and the Vault trigger", () => {
     expect(migrationText).not.toContain(secretValue);
     expect(migrationText).not.toContain("Bearer eyJ");
     expect(readFileSync(join(MIGRATIONS_DIR, PHASE6_SCHEMA), "utf8")).not.toContain(secretValue);
+  });
+
+  it("fails closed when the newsroom base URL is missing or not https", async () => {
+    // The old code fell back to a hard-coded project URL. That turned a missing
+    // Vault row into traffic for another project, carrying this project's
+    // bearer token. It must raise instead — nothing is sent.
+    const before = await scalar<number>(staging.db, `select count(*)::int from net.captured_requests`);
+
+    await staging.db.exec(`delete from vault.secrets where name = 'newsroom_base_url'`);
+    await expect(staging.db.exec(`select public.newsroom_trigger('write-desk')`)).rejects.toThrow(
+      /newsroom_base_url missing or invalid/,
+    );
+
+    await staging.db.exec(`select vault.create_secret('http://insecure.example.co', 'newsroom_base_url', 'staging')`);
+    await expect(staging.db.exec(`select public.newsroom_trigger('write-desk')`)).rejects.toThrow(
+      /newsroom_base_url missing or invalid/,
+    );
+
+    const after = await scalar<number>(staging.db, `select count(*)::int from net.captured_requests`);
+    expect(after, "a refused trigger must not queue an HTTP request").toBe(before);
+
+    await staging.db.exec(
+      `select vault.create_secret('https://audit-probe.supabase.co', 'newsroom_base_url', 'staging')`,
+    );
+  });
+
+  it("only forwards the function names on the allow-list", async () => {
+    // The docs used to claim an allow-list that did not exist. It exists now:
+    // the name is validated, not concatenated into a URL.
+    for (const name of ["../v1/admin", "unknown-function", "sitemap"]) {
+      await expect(staging.db.exec(`select public.newsroom_trigger('${name}')`)).rejects.toThrow(
+        /is not an approved function/,
+      );
+    }
+    // Every scheduled target is accepted.
+    for (const name of [
+      "ingest-feeds", "write-desk", "publish-scheduler", "trend-watch",
+      "maintenance", "phase6-monitor", "validate-feeds",
+      "auto-publish", "breaking-news-monitor", "notifications-dispatcher",
+    ]) {
+      await expect(staging.db.exec(`select public.newsroom_trigger('${name}')`)).resolves.not.toThrow();
+    }
   });
 
   it("respects a custom base URL from Vault and warns when the secret is absent", async () => {

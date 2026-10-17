@@ -85,9 +85,15 @@ $$;
 REVOKE ALL ON FUNCTION public.trigger_auto_publish(text) FROM public;
 
 -- 2. Three slots per day, UTC. 6 categories x 3 slots = 18 posts/day.
-SELECT cron.schedule('auto-publish-morning', '0 6 * * *',  $$ SELECT public.trigger_auto_publish('morning'); $$);
-SELECT cron.schedule('auto-publish-midday',  '0 12 * * *', $$ SELECT public.trigger_auto_publish('midday');  $$);
-SELECT cron.schedule('auto-publish-evening', '0 18 * * *', $$ SELECT public.trigger_auto_publish('evening'); $$);
+-- All five jobs in this file are publishing-capable or reader-facing, so they
+-- are created INACTIVE. `db push` commits each file separately; until the Phase
+-- 6 cron migration runs, the only safe state is "scheduled but not running".
+SELECT cron.schedule_in_database('auto-publish-morning', '0 6 * * *',
+  $$ SELECT public.trigger_auto_publish('morning'); $$, current_database(), active := false);
+SELECT cron.schedule_in_database('auto-publish-midday', '0 12 * * *',
+  $$ SELECT public.trigger_auto_publish('midday'); $$, current_database(), active := false);
+SELECT cron.schedule_in_database('auto-publish-evening', '0 18 * * *',
+  $$ SELECT public.trigger_auto_publish('evening'); $$, current_database(), active := false);
 
 -- 3. Breaking-news monitor keeps its own cadence (it only publishes when a
 --    genuinely new headline appears).
@@ -127,7 +133,8 @@ $$;
 
 REVOKE ALL ON FUNCTION public.trigger_breaking_news_monitor() FROM public;
 
-SELECT cron.schedule('breaking-news-monitor', '*/30 * * * *', $$ SELECT public.trigger_breaking_news_monitor(); $$);
+SELECT cron.schedule_in_database('breaking-news-monitor', '*/30 * * * *',
+  $$ SELECT public.trigger_breaking_news_monitor(); $$, current_database(), active := false);
 
 -- 4. Notifications dispatcher every 10 minutes (it is idempotent per slug/kind/day).
 DO $$
@@ -165,4 +172,5 @@ $$;
 
 REVOKE ALL ON FUNCTION public.trigger_notifications_dispatcher() FROM public;
 
-SELECT cron.schedule('notifications-dispatcher', '*/10 * * * *', $$ SELECT public.trigger_notifications_dispatcher(); $$);
+SELECT cron.schedule_in_database('notifications-dispatcher', '*/10 * * * *',
+  $$ SELECT public.trigger_notifications_dispatcher(); $$, current_database(), active := false);

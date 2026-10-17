@@ -61,7 +61,7 @@ jobs:
         run: npm run build
         env:
           # Public, client-side values only — no secrets belong in a Vite build.
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://ruusbjlabbojpbawbphc.supabase.co' }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://xuqxautmflofkvbsaanh.supabase.co' }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
           VITE_SITE_URL: ${{ vars.VITE_SITE_URL || 'https://newssparkle.lovable.app' }}
 

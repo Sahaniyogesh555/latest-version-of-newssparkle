@@ -12,8 +12,8 @@ npm ci && npm run verify            # typecheck + lint + test + build
 # deploy `dist/` to the host (Lovable / Vercel / Netlify / Cloudflare Pages)
 
 # 2. Database
-supabase link --project-ref <project-ref>
-supabase db push                    # applies supabase/migrations
+supabase link --project-ref xuqxautmflofkvbsaanh    # the NewsSparkle project (ap-south-1)
+supabase db push                    # applies supabase/migrations (14 files)
 
 # 3. Functions
 npm run check:functions             # real `deno check` on every entrypoint
@@ -90,25 +90,32 @@ supabase secrets set PEXELS_API_KEY=<optional: image fallback>
 
 ### Second Vault entry: the newsroom base URL
 
-The Phase 6 cron wrappers build their function URL from Vault as well, so the
-database never has to hard-code a host:
+The Phase 6 cron wrappers build their function URL from Vault, so the database
+never has to hard-code a host. **This row is required** — create it before the
+first `db push` for a new project:
 
 ```sql
--- defaults to https://<project-ref>.supabase.co when absent
-select vault.create_secret('https://<project-ref>.supabase.co', 'newsroom_base_url',
+select vault.create_secret('https://xuqxautmflofkvbsaanh.supabase.co', 'newsroom_base_url',
                            'NewsSparkle automation host');
 ```
+
+There is no fallback. A missing or non-https value makes `newsroom_trigger`
+raise and send nothing, which is the correct failure mode: the previous
+fallback silently sent one project's cron traffic, with its bearer token, to a
+different project. The function name is also checked against an allow-list, so
+a typo cannot address an arbitrary endpoint.
 
 Both names are read on every run:
 
 | Vault name | Used for | If it is missing |
 | --- | --- | --- |
 | `auto_publish_secret` | `Authorization: Bearer` header | cron calls return **401** and log a warning |
-| `newsroom_base_url` | `net.http_post` target | falls back to the project URL |
+| `newsroom_base_url` | `net.http_post` target | `newsroom_trigger` raises; nothing is sent |
 
-Every targeted function name is rejected if it is not in the migration's
-allow-list, so a typo in a cron job cannot make the database call an arbitrary
-endpoint.
+Every targeted function name is checked against the allow-list inside
+`newsroom_trigger` (ten scheduled names, nothing else), so a typo in a cron job
+cannot make the database call an arbitrary endpoint. A test asserts both the
+allow-list and the fail-closed host behaviour.
 
 
 ### Rotate the legacy anon key
@@ -161,16 +168,19 @@ window in which publishing or archiving starts before preflight, and no manual
 pause can be missed. `cron.schedule` on its own cannot create an inactive job —
 its three-argument form passes NULL `active`, which pg_cron reads as `true`.
 
-Version note — the two cases are different. `cron.schedule_in_database` exists
-from pg_cron 1.4, so a **fresh install** needs 1.4+ (Supabase ships 1.6.x) or
-that migration fails and `db push` stops there; migration `20261016090200`
-cannot rescue it (it only updates rows that already exist, and on a fresh
-install there are none). An **existing project** whose Phase 6 cron migration
-was already applied needs no such function: the repair migration and the gate
-`UPDATE` just flip `active` on rows that already exist, which needs only the
-`cron.job` table and its `jobname` column (pg_cron 1.3+). Check
-`select extversion from pg_extension where extname = 'pg_cron';` before the
-first push.
+Version note — pg_cron **1.4 or newer is required in both cases**, and the two
+cases are otherwise identical. A **fresh install** needs
+`cron.schedule_in_database`; an **existing project** whose cron migration was
+already applied needs `cron.alter_job` for the gate and the repair migrations.
+Both functions arrive in 1.4. Supabase ships 1.6.x on PostgreSQL 13+, but check
+before the first push:
+
+```sql
+select extversion from pg_extension where extname = 'pg_cron';
+```
+
+Below 1.4 there is no SQL workaround in this repository: the cron migration
+fails at its first `schedule_in_database`, and `db push` stops there.
 
 Re-applying the migration set stays safe too: the schedule upsert
 (`on conflict on constraint jobname_username_uniq do update`) rewrites
@@ -190,31 +200,37 @@ Everything below is an `UPDATE` on `cron.job`, so pausing is always reversible
 and never deletes a job or a post.
 
 ```sql
--- The gate: the canonical statement from the migration, the operator checklist
+-- The gate: the canonical statement from the migrations, the operator checklist
 -- and the test suite. Closes everything that can publish, spend LLM budget,
 -- alert readers or archive published content; keeps ingestion, trends, the
 -- monitor and both prunes running, so you still see candidates and alerts.
-update cron.job set active = false
+select cron.alter_job(jobid, active => false)
+  from cron.job
  where jobname in ('write-desk','publish-scheduler',
                    'auto-publish-morning','auto-publish-midday','auto-publish-evening',
                    'breaking-news-monitor','notifications-dispatcher',
                    'newsroom-maintenance');
 
 -- Pause the entire loop as well (nothing is deleted, no post is lost).
-update cron.job set active = false;
+select cron.alter_job(jobid, active => false) from cron.job;
 
 -- Resume everything.
-update cron.job set active = true;
+select cron.alter_job(jobid, active => true) from cron.job;
 ```
 
 After a gate or resume, `select jobname, active from cron.job order by jobname;`
 must show 8 of 14 (gate) or 14 of 14 (resume) active.
 
-Direct `UPDATE` on `cron.job` is what pg_cron's own `cron_job_cache_invalidate`
-trigger exists for: the change is picked up by the scheduler without a restart
-(verified in the pg_cron sources, v1.4.0 … v1.6.4). `cron.alter_job(job_id,
-active := false)` is the documented API equivalent, but it is REVOKEd from
-`public`, so it only works for the role that owns the job.
+Why not `update cron.job set active = …`? On Supabase the `postgres` role has
+SELECT only on `cron.job` (supabase/postgres migration `20231020085357`,
+re-applied whenever pg_cron is created), so a direct UPDATE fails with
+"permission denied for table job" — in the SQL editor and inside `db push`
+alike. `cron.alter_job(job_id, schedule, command, database, username, active)`
+is the supported API from pg_cron 1.4: it runs as the extension owner, changes
+only the arguments supplied (schedules and commands are preserved), and
+invalidates the job cache the same way the UPDATE did. Run it as `postgres`,
+the role that created the jobs; another role gets "Job N does not exist or you
+don't own it".
 
 `cron.unschedule('jobname')` is the permanent version and is what the migration
 uses before it re-creates a job.
@@ -227,13 +243,20 @@ spend LLM budget, alert readers or archive content can run before you have been
 through this list. Do it in order.
 
 ```bash
+# 0. Create BOTH Vault rows first (see section 2). The base URL is required:
+#    without it every cron job fails closed and nothing ingests.
+#      select vault.create_secret('https://xuqxautmflofkvbsaanh.supabase.co',
+#                                 'newsroom_base_url', 'NewsSparkle automation host');
+
 # 1. Apply the migrations, then confirm the gate is closed (it already is).
-supabase db push
+supabase link --project-ref xuqxautmflofkvbsaanh
+supabase db push            # 14 migrations
 #    SQL editor — the canonical gate statement. It is a no-op on a fresh
 #    install, and it is what closes the gate on a project migrated before the
-#    fail-closed change. UPDATE, not cron.alter_job: the latter is REVOKEd from
-#    public and only works for the role that owns the jobs.
-#      update cron.job set active = false
+#    fail-closed change. cron.alter_job, not UPDATE: `postgres` has SELECT only
+#    on cron.job, so an UPDATE fails with "permission denied for table job".
+#      select cron.alter_job(jobid, active => false)
+#        from cron.job
 #       where jobname in ('write-desk','publish-scheduler',
 #                         'auto-publish-morning','auto-publish-midday','auto-publish-evening',
 #                         'breaking-news-monitor','notifications-dispatcher',
@@ -242,10 +265,10 @@ supabase db push
 #      -> 8 of 14 jobs inactive (gated) / 6 active (safe), i.e. those 8 rows
 #         false and ingest-feeds / trend-watch / phase6-monitor /
 #         validate-feeds-daily / prune-post-view-events / prune-automation true.
-#    If the count is not 8/6, stop: migration 20261016090200 closes the gate
-#    again on any project that already has the jobs (re-runnable, changes
-#    nothing else). It never creates a job, so it is not a fix for a fresh
-#    install that failed on an unsupported pg_cron - see the note above.
+#    If the count is not 8/6, stop: migrations 20261016090200 and
+#    20261017090000 close the gate again on any project that already has the
+#    jobs (re-runnable, change nothing else). They never create a job, so they
+#    are not a fix for a fresh install that failed on pg_cron < 1.4.
 
 # 2. Secrets — the same value in Vault and in the function environment.
 openssl rand -hex 32
@@ -280,9 +303,9 @@ curl -sS -X POST ".../functions/v1/publish-scheduler" -H "Authorization: Bearer 
 #    call returns published: 0.
 
 # 6. Only now, re-enable the loop - in two documented steps.
-#    G1 (publishing):  update cron.job set active = true
+#    G1 (publishing):  select cron.alter_job(jobid, active => true) from cron.job
 #                       where jobname in ('write-desk','publish-scheduler');
-#    G2 (after 24h):   update cron.job set active = true
+#    G2 (after 24h):   select cron.alter_job(jobid, active => true) from cron.job
 #                       where jobname in ('auto-publish-morning','auto-publish-midday',
 #                                         'auto-publish-evening','breaking-news-monitor',
 #                                         'notifications-dispatcher');
@@ -291,7 +314,7 @@ curl -sS -X POST ".../functions/v1/publish-scheduler" -H "Authorization: Bearer 
 #     `active :=` only works with pg_cron 1.4+.)
 #    G3 (maintenance) is a SEPARATE decision, not part of the publishing
 #    ramp-up: run the query in the paragraph below first, then
-#      update cron.job set active = true
+#      select cron.alter_job(jobid, active => true) from cron.job
 #       where jobname in ('newsroom-maintenance');
 #    Leaving it inactive is a supported state - ingestion, writing, publishing,
 #    trends, the monitor and both prunes are unaffected.
@@ -320,7 +343,7 @@ leaving `newsroom-maintenance` inactive for good. An archive is reversible:
 
 Stop conditions: if `phase6-monitor` returns `ok:false` *for a change you made*,
 if the desk writes nothing for 12 hours, or if any post reads wrong — close the
-gate with the step 1 UPDATE, fix forward, and re-run steps 4–5. A fresh project
+gate with the step 1 statement, fix forward, and re-run steps 4–5. A fresh project
 reports `ok:false` with "candidate queue empty and nothing scheduled" until the
 first candidates arrive; that is expected, not a failure.
 

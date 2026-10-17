@@ -222,14 +222,71 @@ describe("edge functions", () => {
 describe("the Phase 6 cron gate is one statement in four places", () => {
   const MIGRATION = "supabase/migrations/20261016090100_phase6_autonomy_crons.sql";
   const REPAIR = "supabase/migrations/20261016090200_phase6_activation_gate.sql";
+  const PRIVILEGE_REPAIR = "supabase/migrations/20261017090000_phase6_privileges_and_gate_repair.sql";
   const CHECKLIST = "phase6_activation_checklist.txt";
   const gate = normaliseSql(GATE_SQL);
 
-  it("embeds the identical gate statement in the migration, the repair migration, the checklist and OPERATIONS.md", () => {
-    const missing = [MIGRATION, REPAIR, CHECKLIST, OPERATIONS].filter(
+  it("embeds the identical gate statement in every migration and both operator documents", () => {
+    const missing = [MIGRATION, REPAIR, PRIVILEGE_REPAIR, CHECKLIST, OPERATIONS].filter(
       (file) => !normaliseSql(read(file)).includes(gate),
     );
     expect(missing).toEqual([]);
+  });
+
+  it("never issues the UPDATE form the platform rejects", () => {
+    // Supabase grants `postgres` SELECT only on cron.job. A direct UPDATE fails
+    // with "permission denied for table job" and aborts `db push` (audit F1).
+    // Only real statements are flagged: prose may of course name the form while
+    // explaining why it is forbidden.
+    const statement = /^[ \t]*update[ \t]+cron\.job/im;
+    const offenders: string[] = [];
+    for (const file of walk("supabase/migrations", [".sql"])) {
+      const text = read(file).replace(/--[^\n]*/g, "");
+      if (statement.test(text)) offenders.push(file);
+    }
+    for (const dir of ["supabase/functions", "scripts"]) {
+      for (const file of walk(dir, [".ts", ".mjs"])) {
+        if (statement.test(stripComments(read(file)))) offenders.push(file);
+      }
+    }
+    for (const file of [CHECKLIST, OPERATIONS]) {
+      if (statement.test(read(file))) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
+    expect(normaliseSql(read(MIGRATION))).toMatch(/select cron\.alter_job\(jobid, active => false\)/);
+  });
+
+  it("creates every job through the API that can express `inactive`", () => {
+    // F4: no migration may create a job with cron.schedule() unless the job is
+    // in the safe set — cron.schedule() always inserts active.
+    const offenders: string[] = [];
+    for (const file of walk("supabase/migrations", [".sql"])) {
+      const text = stripComments(read(file));
+      for (const match of text.matchAll(/cron\.schedule\(\s*'([a-z0-9-]+)'/g)) {
+        if (!SAFE_JOB_NAMES.includes(match[1])) offenders.push(`${file}: ${match[1]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps the retired project out of the runtime files", () => {
+    // The old ref may survive only in historical migrations, docs that explain
+    // the move, and REPO_ANALYSIS.md.
+    // src/test is excluded on purpose: the suite has to be able to name the
+    // retired ref to assert that it is gone from everything else.
+    const runtime = [
+      ...walk("supabase/functions", [".ts"]),
+      ...walk("src", [".ts", ".tsx"]).filter((file) => !file.startsWith("src/test/")),
+      "supabase/migrations/20261016090100_phase6_autonomy_crons.sql",
+      "supabase/migrations/20261016090200_phase6_activation_gate.sql",
+      "supabase/migrations/20261017090000_phase6_privileges_and_gate_repair.sql",
+    ];
+    const offenders = runtime.filter((file) => read(file).includes("ruusbjlabbojpbawbphc"));
+    expect(offenders).toEqual([]);
+    // The trigger must fail closed instead of guessing a host.
+    expect(read("supabase/migrations/20261016090100_phase6_autonomy_crons.sql")).toMatch(
+      /newsroom_base_url missing or invalid in Vault/,
+    );
   });
 
   it("keeps every `active = false` statement in the docs limited to the gated job set", () => {

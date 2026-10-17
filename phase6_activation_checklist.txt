@@ -1,7 +1,12 @@
 PHASE 6.1 AUDIT — PRODUCTION ACTIVATION CHECKLIST
 ==================================================
-Audited: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
-Project ref: ruusbjlabbojpbawbphc
+Audited: 2026-10-15 (revised 2026-10-17 for the new project)
+Branch: arena/e59698ee-latest-version-of-newssparkle
+Target project ref: xuqxautmflofkvbsaanh   (NewsSparkle, ap-south-1, PostgreSQL 17.11)
+Previous project:   ruusbjlabbojpbawbphc — the ref still baked into .env,
+                    supabase/config.toml and supabase/migrations until the
+                    Phase 5 cutover. Do not confuse the two: steps A1/B1 link
+                    to the TARGET project.
 Status of this document: nothing here has been executed against the live
 project. Every step is labelled PASS (verified locally with real engines, or
 proven by reading the code) or BLOCKED (needs the real dashboard/CLI and
@@ -13,16 +18,25 @@ IF IT FAILS (the stop/rollback action). Do not continue past a failed step.
 --------------------------------------------------------------------------------
 SECTION 0 — WHAT IS ALREADY VERIFIED (do not redo)
 --------------------------------------------------------------------------------
-PASS  All 13 migrations apply in filename order against real PostgreSQL 18.6,
+PASS  All 14 migrations apply in filename order against real PostgreSQL 18.6,
       with only the pg_cron/pg_net/pgcrypto `create extension` lines stubbed.
-      src/test/phase6-sql.test.ts (19 tests, run at the fail-closed correction
-      commit 822d9d7 with this document's counts).
-      HISTORICAL: the same chain passed with 12 files at the 6.1 audit commit
-      (9cd5cc0). Migration 20261016090200 did not exist in that run, so no
-      earlier result covers it - only the run named above does.
-PASS  All three Phase 6 migrations are re-runnable (idempotent): re-applying
+      src/test/phase6-sql.test.ts (27 tests, Phase 0 correction commit) - the
+      same commit that produced this document's numbers.
+      HISTORICAL: the chain passed with 12 files at the 6.1 audit (9cd5cc0)
+      and with 13 at the gate correction (eb1b0f0). Neither run covers
+      migration 20261017090000; only the run named above does.
+PASS  All four Phase 6 migrations are re-runnable (idempotent): re-applying
       them keeps 24 sources at 24 and 14 cron jobs at 14, and leaves the gate
       at 8 inactive / 6 active.
+PASS  Privileges now match a real project: Supabase's default privileges are
+      modelled in the test harness, and no SECURITY DEFINER function is
+      executable by anon/authenticated except increment_post_views. The
+      publishing triggers are executable only by `postgres` (pg_cron).
+PASS  The cron gate uses cron.alter_job, the API the platform permits; a test
+      proves a SELECT-only role cannot UPDATE cron.job and that no migration
+      reintroduces that form.
+PASS  No publishing-capable job is active at any intermediate point of the
+      migration chain (every file prefix is asserted).
 PASS  RLS/privileges: anon + authenticated hold no SELECT/INSERT on any
       automation table; posts keeps its published-only read policy.
 PASS  The 7 service-role RPCs are SECURITY DEFINER with a pinned search_path.
@@ -46,9 +60,15 @@ SECTION A — PRE-FLIGHT (read-only, no changes)
 --------------------------------------------------------------------------------
 A1. Confirm you are pointed at the right project.
     DO     supabase projects list   |   or read project_id in supabase/config.toml
-    EXPECT project_id = ruusbjlabbojpbawbphc (the repo's only project ref).
-    NOTE   The only other ref in the repo (gjmmnqtfvnjlwzqwzrzu) is inside a
-           historical migration, not the current project. See Section F.
+    EXPECT project_id = xuqxautmflofkvbsaanh after the Phase 0 link step. Until the cutover,
+           supabase/config.toml still says ruusbjlabbojpbawbphc — the old
+           project — and `supabase link` overrides it for every CLI command.
+    NOTE   Three refs exist in the repo. xuqxautmflofkvbsaanh is the target;
+           ruusbjlabbojpbawbphc is the previous project, still referenced by
+           .env, config.toml and the migration chain; gjmmnqtfvnjlwzqwzrzu
+           appears only inside a historical migration and a legacy JWT
+           (Section F). A repo-integrity test now forbids the first two inside
+           the Phase 6 runtime files.
     BLOCKED until the CLI is authenticated on your machine.
 
 A2. Record the "before" state so you can prove what changed.
@@ -63,13 +83,12 @@ A2. Record the "before" state so you can prove what changed.
     NOTE   Record extversion. It matters in TWO DIFFERENT CASES, and they must
            not be conflated:
              (a) EXISTING project whose Phase 6 cron migration was already
-                 applied: the jobs exist, and the repair migration
-                 20261016090200 (plus B2) closes the gate with a plain
-                 `update cron.job ...`. That path needs no
-                 cron.schedule_in_database - only the cron.job table and its
-                 `jobname` column (pg_cron 1.3+), which such a project already
-                 has, because the jobs being gated were created through it.
-                 Works on any version that could have created them.
+                 applied: the jobs exist, and the repair migrations
+                 20261016090200 + 20261017090000 (plus B2) close the gate with
+                 cron.alter_job. That path needs no cron.schedule_in_database,
+                 but it does need cron.alter_job - pg_cron 1.4+, the same floor
+                 as (b). Older versions cannot be repaired by this chain; see
+                 the note at the end of this step.
              (b) FRESH INSTALL (no Phase 6 jobs yet): the cron migration
                  20261016090100 creates the eight gated jobs with
                  cron.schedule_in_database(..., active := false). That function
@@ -81,19 +100,30 @@ A2. Record the "before" state so you can prove what changed.
                    select extversion from pg_extension where extname = 'pg_cron';
                  If it is < 1.4, update the extension (or the platform plan) so
                  the version is available first; do not hand-create the jobs.
-           cron.alter_job(jobid, active := false) (1.4+, REVOKEd from public,
-           owner role only) stays an optional alternative to the UPDATE forms.
+           VERSION FLOOR, BOTH CASES: pg_cron 1.4. Fresh installs need
+           cron.schedule_in_database (1.4+); existing projects need
+           cron.alter_job (1.4+). Every Supabase project on PostgreSQL 13+
+           ships 1.6.x, but read extversion before you start - if it is below
+           1.4, this chain cannot run and no workaround exists inside SQL.
     BLOCKED (needs dashboard/SQL editor).
 
 --------------------------------------------------------------------------------
 SECTION B — APPLY MIGRATIONS AND PAUSE, IN THIS ORDER
 --------------------------------------------------------------------------------
+For a NEW project the safe order is C1-C3 (Vault) -> B1 (push) -> B2 (verify
+the gate). The sections are numbered by topic, not by execution order; this
+line is the execution order.
 B1. Apply the migrations.
-    DO     supabase link --project-ref ruusbjlabbojpbawbphc
+    PREREQUISITE  Complete C1-C3 first: the two Vault rows must exist BEFORE
+           this push. `newsroom_base_url` is no longer optional (C3), and
+           without it every cron job fails closed instead of guessing a host.
+    DO     supabase link --project-ref xuqxautmflofkvbsaanh
            supabase db push
-    EXPECT 13 migrations applied, 0 errors (the last one,
-           20261016090200_phase6_activation_gate.sql, is a no-op on a fresh
-           install: 20261016090100 already created the gate set inactive).
+    EXPECT 14 migrations applied, 0 errors (the last two,
+           20261016090200_phase6_activation_gate.sql and
+           20261017090000_phase6_privileges_and_gate_repair.sql, are no-ops on
+           a fresh install: 20261016090100 already created the gate set
+           inactive and the privilege repair is idempotent).
            The Phase 6 cron migration creates
            the eight jobs that can publish, queue with LLM budget, alert readers
            or archive published content INACTIVE (cron.schedule_in_database
@@ -132,7 +162,8 @@ B2. Verify the gate — and close it if this project applied an older revision.
     change, its jobs exist ACTIVE and this is what closes them. It does nothing
     for the fresh-install case, where the version requirement sits in the cron
     migration itself (see A2 note (b) and B1).
-    DO     update cron.job set active = false
+    DO     select cron.alter_job(jobid, active => false)
+             from cron.job
             where jobname in ('write-desk','publish-scheduler',
                               'auto-publish-morning','auto-publish-midday','auto-publish-evening',
                               'breaking-news-monitor','notifications-dispatcher',
@@ -176,17 +207,27 @@ B2. Verify the gate — and close it if this project applied an older revision.
         phase6-monitor (reads + writes alerts), validate-feeds-daily,
         prune-post-view-events, prune-automation.
 
-    WHY UPDATE, NOT cron.alter_job()
-           `update cron.job set active = ...` is what pg_cron's own
-           cron_job_cache_invalidate trigger exists for: the change is picked up
-           without a restart (verified in the pg_cron sources, v1.4.0–v1.6.4).
-           cron.alter_job(job_id, …, active := false) is the API equivalent, but
-           pg_cron REVOKEs it from public, so it only works for the role that
-           owns the job. The parameter is named `active`: a wrong name fails with
+    WHY cron.alter_job, NOT `update cron.job`
+           Supabase gives the `postgres` role SELECT only on cron.job
+           (supabase/postgres migration 20231020085357, re-applied whenever
+           pg_cron is created). A direct UPDATE therefore fails with
+           "permission denied for table job" — in the SQL editor and inside
+           `db push` alike. It is not a role problem and retrying will not help.
+           cron.alter_job(job_id, schedule, command, database, username, active)
+           is the supported API from pg_cron 1.4: it runs as the extension
+           owner, changes only the arguments supplied (so schedules and
+           commands survive untouched), invalidates the job cache the same way
+           the UPDATE did, and is granted to `postgres` by Supabase. The
+           parameter is named `active`: a wrong name fails with
            "function cron.alter_job(bigint, active => boolean) does not exist".
+           It also only touches jobs you own — you run it as `postgres`, which
+           created them, so this is automatic; a different role gets
+           "Job N does not exist or you don't own it".
     IF IT FAILS
-           - "permission denied for table job": run it as the role the migration
-             used (the SQL editor's postgres role).
+           - "permission denied for table job": you used the UPDATE form. Use
+             the alter_job statement above.
+           - "function cron.alter_job(bigint, active => boolean) does not
+             exist": pg_cron older than 1.4. Upgrade it (see A2 note (b)).
            - Unsure who owns the jobs: select jobname, username, active from cron.job;
            - Anything other than 8/6, or an unexpected job name: STOP. Do not
              proceed to the dry run. Compare against
@@ -244,15 +285,20 @@ C2. Put the SAME value in two places. These two MUST MATCH exactly.
             where name in ('auto_publish_secret','newsroom_base_url');
            -> auto_publish_secret present.
 
-C3. Second Vault entry: the base URL (does NOT need to match anything).
-    DO     select vault.create_secret('https://ruusbjlabbojpbawbphc.supabase.co',
+C3. Second Vault entry: the base URL. REQUIRED, and it must be created BEFORE
+    the migrations (C3 comes before B1 in the safe order for a new project).
+    DO     select vault.create_secret('https://xuqxautmflofkvbsaanh.supabase.co',
                                       'newsroom_base_url',
                                       'NewsSparkle automation host');
-    WHY    The trigger builds `<base>/functions/v1/<function>`. If absent it
-           falls back to the hard-coded project URL, so this is a convenience,
-           not a requirement — but set it, so a future project move is a
-           one-row change instead of a migration.
-    EXPECT Both rows from C2/C3 now present.
+    WHY    The trigger builds `<base>/functions/v1/<function>` from this row.
+           There is NO fallback any more: if the row is missing or not an
+           https URL, newsroom_trigger raises and sends nothing. That is
+           deliberate — the old hard-coded fallback sent a project's cron
+           traffic, with its bearer token, to a different project. Without this
+           row every cron job fails, safely but noisily.
+           The function name is also checked against an allow-list, so a typo
+           cannot address an arbitrary endpoint.
+    EXPECT Both rows from C2/C3 present.
 
 C4. AI key and site origin in the function environment.
     DO     supabase secrets set LOVABLE_API_KEY=<AI gateway key>
@@ -276,8 +322,13 @@ C4. AI key and site origin in the function environment.
 
 C5. Front-end build variables (public by design; never put secrets here).
     REPO   VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY, VITE_SITE_URL,
-           VITE_DEMO_MODE=false. Set in the host's build environment (.env is
-           gitignored; .env.example documents the names).
+           VITE_DEMO_MODE=false. Set in the host's build environment.
+    TRUTH  `.env` IS TRACKED IN GIT (it is not gitignored). It holds the old
+           project's URL plus its anon/publishable key — a client-side key that
+           is designed to be public, not a service-role key — and no AI, Vault
+           or automation secret. Updating it is therefore a normal reviewed
+           commit, not a local-only change; never add a real secret to it.
+           .env.example documents every name.
     NOTE   VITE_DEMO_MODE=true serves local fixtures instead of the database —
            never enable it in a deployed build.
     BLOCKED (host dashboard).
@@ -313,9 +364,9 @@ D3. Deploy. Supabase takes one command per function or a directory sweep.
 D4. Verify the gateway contract (public endpoints open, automation closed).
     DO     for f in sitemap news-sitemap rss; do
              curl -s -o /dev/null -w "$f %{http_code}\n" \
-               "https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/$f"; done
+               "https://xuqxautmflofkvbsaanh.supabase.co/functions/v1/$f"; done
            curl -s -o /dev/null -w 'ingest-feeds %{http_code}\n' -X POST \
-             "https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/ingest-feeds" -d '{}'
+             "https://xuqxautmflofkvbsaanh.supabase.co/functions/v1/ingest-feeds" -d '{}'
     EXPECT 200 200 200 and 401.
     WHY    This is the single most important safety property: a write-capable
            endpoint that answers 200 without credentials can be triggered by
@@ -444,7 +495,7 @@ hygiene of the other one:
     project shipped it).
   - It is scoped to a DIFFERENT project (ref gjmmnqtfvnjlwzqwzrzu). PostgREST /
     the gateway verify the project's JWT secret, so this token cannot
-    authenticate against ruusbjlabbojpbawbphc at all — it is inert here.
+    authenticate against the target project at all — it is inert here.
   - The cron job that used it was superseded by
     20261015120200_reschedule_auto_publish_18_per_day.sql, and the Phase 6
     migration unschedules that job name explicitly.
@@ -457,7 +508,7 @@ hygiene of the other one:
       - either way, do NOT rewrite the migration (applied migrations are
         history; the token is already in git history).
 
-SAFE ROTATION SEQUENCE — for the CURRENT project (ruusbjlabbojpbawbphc), only if
+SAFE ROTATION SEQUENCE — for the CURRENT project (xuqxautmflofkvbsaanh), only if
 you are deliberately rotating (e.g. before handing the project over). Rotating
 the anon key alone does NOT invalidate the service_role key or the JWT secret.
     DO     1. Dashboard -> Settings -> API -> rotate the anon/publishable key.
@@ -490,7 +541,7 @@ SQL below is the exact text the test suite reads from this file and executes
 against PostgreSQL, so what you run here is what is verified.
 
 G1. Enable writing and publishing, after SECTION E has passed.
-    DO     update cron.job set active = true
+    DO     select cron.alter_job(jobid, active => true) from cron.job
             where jobname in ('write-desk','publish-scheduler');
     EXPECT active count goes from 6 to 8; the 6 remaining gate jobs stay
            inactive. After that:
@@ -511,7 +562,7 @@ G1. Enable writing and publishing, after SECTION E has passed.
            before re-enabling.
 
 G2. After 24 hours of G1 behaving, enable the editions and the reader alerts.
-    DO     update cron.job set active = true
+    DO     select cron.alter_job(jobid, active => true) from cron.job
             where jobname in ('auto-publish-morning','auto-publish-midday','auto-publish-evening',
                               'breaking-news-monitor','notifications-dispatcher');
     WHY    auto-publish runs the whole pipeline unattended (ingest -> write ->
@@ -527,7 +578,7 @@ G3. Maintenance — a SEPARATE decision, and the only step that needs the B3
     archive review first.
     DO     complete B3 (the archive pre-check) and decide what those rows mean.
            Only then:
-             update cron.job set active = true
+             select cron.alter_job(jobid, active => true) from cron.job
              where jobname in ('newsroom-maintenance');
     WHY    Keeping this as its own step means a project can publish perfectly
            while never archiving anything: an operator who has not reviewed the
@@ -553,17 +604,19 @@ SECTION H — EMERGENCY STOP AND ROLLBACK REFERENCE
 --------------------------------------------------------------------------------
   -- 1. Stop everything that can change public content or reader state.
   --    This is the same statement as B2 — one canonical gate, no variants.
-  update cron.job set active = false
+  select cron.alter_job(jobid, active => false)
+    from cron.job
    where jobname in ('write-desk','publish-scheduler',
                      'auto-publish-morning','auto-publish-midday','auto-publish-evening',
                      'breaking-news-monitor','notifications-dispatcher',
                      'newsroom-maintenance');
   -- 2. Stop everything, ingestion and monitoring included — reversible,
   --    deletes nothing; use when you want total silence, not just safety.
-  update cron.job set active = false;
+  select cron.alter_job(jobid, active => false) from cron.job;
   -- 3. Back to the post-migration state (6 safe jobs only).
-  update cron.job set active = true;
-  update cron.job set active = false
+  select cron.alter_job(jobid, active => true) from cron.job;
+  select cron.alter_job(jobid, active => false)
+    from cron.job
    where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
                      'auto-publish-midday','auto-publish-evening',
                      'breaking-news-monitor','notifications-dispatcher',

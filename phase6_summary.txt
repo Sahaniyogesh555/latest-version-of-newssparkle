@@ -231,8 +231,9 @@ no candidates, publishing stalled).
      AI_BASE_URL, AI_MODEL    optional, defaults to OpenAI + gpt-4o-mini
      SITE_URL                 canonical origin
      UNSPLASH_ACCESS_KEY, PEXELS_API_KEY   optional but recommended
-   Also confirm Vault holds `newsroom_base_url`
-   (default https://ruusbjlabbojpbawbphc.supabase.co).
+   Vault MUST hold `newsroom_base_url` (https://<project-ref>.supabase.co).
+   It is required, not optional: without it newsroom_trigger raises and no
+   request is sent. There is no hard-coded fallback.
 3. Deploy the functions:
      supabase functions deploy ingest-feeds write-desk publish-scheduler \
        trend-watch maintenance phase6-monitor auto-publish

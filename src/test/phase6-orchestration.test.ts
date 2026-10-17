@@ -33,7 +33,12 @@ import {
 const AI: AiConfig = { apiKey: "test", baseUrl: "https://ai.example.com/v1", model: "gpt-4o-mini" };
 
 /** The pipeline clock is injected, so fixtures must be relative to it. */
-const NOW = new Date("2026-10-16T13:00:00Z");
+// The wall clock, captured once. The fixtures build "N minutes ago" from the
+// real clock, so the orchestrator must be given the same clock: a hard-coded
+// date (2026-10-16T13:00:00Z) silently rotted the suite the day the wall clock
+// moved past it — every scheduled post became "due in 26 hours". Capturing it
+// once keeps the run internally consistent.
+const NOW = new Date();
 const minutesAgo = (minutes: number) => new Date(NOW.getTime() - minutes * 60_000).toISOString();
 
 /** Chat-completions stub: writer prompt → article, verifier prompt → verdict. */
@@ -157,7 +162,7 @@ describe("ingest-feeds", () => {
   it("skips feeds that are inside their cooldown window", async () => {
     const { db } = createFakeDb({
       sources: [
-        sourceFixture({ disabled_until: "2026-10-16T20:00:00Z" }),
+        sourceFixture({ disabled_until: new Date(NOW.getTime() + 7 * 3_600_000).toISOString() }),
         sourceFixture({ id: "src-live", name: "Live Wire", url: "https://feeds.example.com/live.xml" }),
       ],
     });
@@ -481,17 +486,21 @@ describe("publish-scheduler", () => {
 /* Trend watch                                                                */
 /* -------------------------------------------------------------------------- */
 
+// pubDate is relative to the run: trend-watch drops anything older than
+// FEED_LIMITS.maxAgeHours (36h), so a hard-coded date rots within two days.
+const trendsPubDate = (hoursAgo: number) =>
+  new Date(NOW.getTime() - hoursAgo * 3_600_000).toUTCString();
 const TRENDS_XML = `<?xml version="1.0"?><rss version="2.0"><channel>
   <item>
     <title>energy price cap</title>
     <ht:approx_traffic>200,000+</ht:approx_traffic>
-    <pubDate>Fri, 16 Oct 2026 10:00:00 GMT</pubDate>
+    <pubDate>${trendsPubDate(3)}</pubDate>
     <ht:news_item_title>Regulator confirms energy price cap rise</ht:news_item_title>
   </item>
   <item>
     <title>streaming service price rise</title>
     <ht:approx_traffic>20,000+</ht:approx_traffic>
-    <pubDate>Fri, 16 Oct 2026 09:00:00 GMT</pubDate>
+    <pubDate>${trendsPubDate(4)}</pubDate>
   </item>
 </channel></rss>`;
 
