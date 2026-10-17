@@ -237,6 +237,17 @@ alter table public.content_health_checks enable row level security;
 revoke all on public.content_health_checks from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
+-- PRIVILEGES (least privilege, applied at creation time)
+--
+-- Supabase's default privileges grant EXECUTE on every new function in public
+-- to anon, authenticated and service_role, so `revoke ... from public` alone
+-- does NOT undo them. Each function below is revoked from all four roles and
+-- granted back only to the role that genuinely calls it. This happens in the
+-- same migration that creates the function, so no later `db push` boundary
+-- leaves a privileged RPC reachable with the public anon key.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
 -- 8. Alert helper — dedupe + count occurrences in one call
 -- ---------------------------------------------------------------------------
 create or replace function public.record_alert(
@@ -260,7 +271,8 @@ as $$
         updated_at  = now();
 $$;
 
-revoke all on function public.record_alert(text, text, text, text, jsonb) from public;
+revoke all on function public.record_alert(text, text, text, text, jsonb) from public, anon, authenticated, service_role;
+grant execute on function public.record_alert(text, text, text, text, jsonb) to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 9. Candidate claiming — atomic, skip-locked, so overlapping runs (manual
@@ -291,7 +303,8 @@ as $$
   returning i.*;
 $$;
 
-revoke all on function public.claim_ingested_items(integer) from public;
+revoke all on function public.claim_ingested_items(integer) from public, anon, authenticated, service_role;
+grant execute on function public.claim_ingested_items(integer) to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 10. Publishing plan helpers
@@ -313,7 +326,8 @@ as $$
      and coalesce(published_at, scheduled_for) >= p_since;
 $$;
 
-revoke all on function public.category_published_count(text, timestamptz) from public;
+revoke all on function public.category_published_count(text, timestamptz) from public, anon, authenticated, service_role;
+grant execute on function public.category_published_count(text, timestamptz) to service_role;
 
 -- LLM spend guard: how many AI calls the newsroom has made today.
 create or replace function public.newsroom_llm_calls_today()
@@ -327,7 +341,8 @@ as $$
    where started_at >= date_trunc('day', now() at time zone 'utc');
 $$;
 
-revoke all on function public.newsroom_llm_calls_today() from public;
+revoke all on function public.newsroom_llm_calls_today() from public, anon, authenticated, service_role;
+grant execute on function public.newsroom_llm_calls_today() to service_role;
 
 -- Single JSON snapshot used by the monitoring endpoint and dashboards.
 create or replace function public.newsroom_status()
@@ -383,7 +398,8 @@ as $$
   );
 $$;
 
-revoke all on function public.newsroom_status() from public;
+revoke all on function public.newsroom_status() from public, anon, authenticated, service_role;
+grant execute on function public.newsroom_status() to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 11. Retention — keep the operational tables from growing forever.
@@ -406,7 +422,8 @@ as $$
    where expires_at < now() - interval '7 days';
 $$;
 
-revoke all on function public.prune_automation_tables() from public;
+revoke all on function public.prune_automation_tables() from public, anon, authenticated, service_role;
+grant execute on function public.prune_automation_tables() to postgres, service_role;
 
 -- ---------------------------------------------------------------------------
 -- 12. Seed the source registry

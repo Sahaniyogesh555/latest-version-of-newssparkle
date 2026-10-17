@@ -20,7 +20,7 @@ SECTION 0 — WHAT IS ALREADY VERIFIED (do not redo)
 --------------------------------------------------------------------------------
 PASS  All 14 migrations apply in filename order against real PostgreSQL 18.6,
       with only the pg_cron/pg_net/pgcrypto `create extension` lines stubbed.
-      src/test/phase6-sql.test.ts (27 tests, Phase 0 correction commit) - the
+      src/test/phase6-sql.test.ts (30 tests, Phase 0 correction commit) - the
       same commit that produced this document's numbers.
       HISTORICAL: the chain passed with 12 files at the 6.1 audit (9cd5cc0)
       and with 13 at the gate correction (eb1b0f0). Neither run covers

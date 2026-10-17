@@ -82,7 +82,11 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.trigger_auto_publish(text) FROM public;
+-- These three helpers make the database send an HTTP request carrying the
+-- Vault automation secret. They are pg_cron-only: revoke the per-role grants
+-- Supabase added at creation, not merely PUBLIC.
+REVOKE ALL ON FUNCTION public.trigger_auto_publish(text) FROM public, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.trigger_auto_publish(text) TO postgres;
 
 -- 2. Three slots per day, UTC. 6 categories x 3 slots = 18 posts/day.
 -- All five jobs in this file are publishing-capable or reader-facing, so they
@@ -131,7 +135,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.trigger_breaking_news_monitor() FROM public;
+REVOKE ALL ON FUNCTION public.trigger_breaking_news_monitor() FROM public, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.trigger_breaking_news_monitor() TO postgres;
 
 SELECT cron.schedule_in_database('breaking-news-monitor', '*/30 * * * *',
   $$ SELECT public.trigger_breaking_news_monitor(); $$, current_database(), active := false);
@@ -170,7 +175,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.trigger_notifications_dispatcher() FROM public;
+REVOKE ALL ON FUNCTION public.trigger_notifications_dispatcher() FROM public, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.trigger_notifications_dispatcher() TO postgres;
 
 SELECT cron.schedule_in_database('notifications-dispatcher', '*/10 * * * *',
   $$ SELECT public.trigger_notifications_dispatcher(); $$, current_database(), active := false);

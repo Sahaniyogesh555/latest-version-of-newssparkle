@@ -1,3 +1,97 @@
+REVIEW FOLLOW-UP — F2 MIGRATION-ORDER GAP (commit b5d944a reviewed)
+==================================================================
+Finding: the Phase 0 repair migration 20261017090000 closed the privilege hole
+only at the END of the chain. Everything between the file that created a
+SECURITY DEFINER function and that repair was still exposed, and `db push`
+commits one file at a time, so the exposure is real on a fresh project.
+
+Window that existed at b5d944a (measured per file boundary):
+  after 20260503120214  increment_post_views(text)   anon/authenticated (intended)
+  after 20261015120100  prune_post_view_events()     anon/authenticated  <-- wrong
+  after 20261015120200  trigger_auto_publish(text),
+                        trigger_breaking_news_monitor(),
+                        trigger_notifications_dispatcher()
+                                                    anon/authenticated  <-- wrong
+  after 20261016090000  record_alert, claim_ingested_items,
+                        category_published_count, newsroom_llm_calls_today,
+                        newsroom_status, prune_automation_tables
+                                                    anon/authenticated  <-- wrong
+  after 20261016090100  newsroom_trigger()          anon/authenticated  <-- wrong
+  after 20261016090200  (gate only; no change to the ACLs)
+  after 20261017090000  closed
+The worst of it: an anon-key holder could call the publishing triggers and the
+Vault-secret-bearing newsroom_trigger from 20261015120200 until the repair
+migration ran — and permanently on a project that stopped pushing at or before
+20261016090100.
+
+FIX — grants are applied in the file that creates the function
+--------------------------------------------------------------
+Eight migrations now carry the least-privilege block themselves, in the same
+file as the CREATE, before any cron job that depends on them is scheduled:
+  20260503120214  increment_post_views(text) + touch_updated_at
+  20260503120234  touch_updated_at (re-created; ACL re-asserted)
+  20261015120000  increment_post_views(text,text)
+  20261015120100  prune_post_view_events
+  20261015120200  trigger_auto_publish, trigger_breaking_news_monitor,
+                  trigger_notifications_dispatcher
+  20261016090000  the six Phase 6 RPCs (header explains the rule)
+  20261016090100  newsroom_trigger + the three Phase-5 helpers
+  20261017090000  unchanged - still the idempotent backstop for projects that
+                  already applied the old versions
+Nothing was granted to PUBLIC. The four-role revoke
+(public, anon, authenticated, service_role) is used everywhere, because the
+Supabase default privileges grant EXECUTE to the three API roles directly at
+creation and `revoke ... from public` does not remove those.
+
+GRANTS PRESERVED (review point 4)
+---------------------------------
+  service_role: increment_post_views(text,text), record_alert,
+                claim_ingested_items, category_published_count,
+                newsroom_llm_calls_today, newsroom_status,
+                prune_automation_tables, prune_post_view_events
+  postgres:     the four HTTP triggers + both prunes (pg_cron)
+  anon/auth:    increment_post_views only
+  Edge-function callers read the same RPCs as before; no function signature,
+  body or SECURITY DEFINER property changed in this follow-up.
+
+NEW REGRESSION TEST (review point 3)
+------------------------------------
+src/test/phase6-sql.test.ts, "privilege boundaries across the migration chain":
+  - applies the chain one file at a time and, after EVERY file, reads
+    aclexplode(pg_proc.proacl) for every SECURITY DEFINER function in public;
+  - compares the exact grantee set against a declared policy table;
+  - fails at the boundary where the grant first appears, naming the file and
+    the role ("anon can execute trigger_auto_publish(text) at this boundary");
+  - a second test asserts the policy table covers every privileged function the
+    chain produces, so a function added later cannot escape the check;
+  - a third test proves the real callers still work (service_role can call
+    record_alert/newsroom_status, postgres can run the prunes, both public
+    roles can bump a view counter) and that anon/authenticated get "permission
+    denied" on newsroom_status() and trigger_auto_publish().
+aclexplode is used rather than has_function_privilege because postgres is the
+superuser in the harness and a superuser check would always say yes.
+
+Mutation evidence:
+  - reverting record_alert to `revoke ... from public`  -> 4 boundary failures
+    starting at 20261016090000 (anon + authenticated);
+  - reverting trigger_auto_publish to the same form    -> failures starting at
+    20261015120200, i.e. the window the review identified;
+  - both files restored (diff verified).
+
+Wording (review point 5)
+------------------------
+Corrected in this report (F4 section), in docs/OPERATIONS.md ("the eight gated
+jobs inactive and the six safe jobs active") and in the repo-integrity test
+name. The earlier commit message's line "every job in the initial chain is
+created with active := false" is inaccurate; only the eight gated jobs are.
+
+EVIDENCE AFTER THE FOLLOW-UP
+----------------------------
+npx vitest run src/test/phase6-sql.test.ts            -> 30 passed (3 new)
+npm run verify                                        -> 12 files / 221 tests
+npm run check:functions                               -> 13/13 entrypoints
+
+
 PHASE 0 — CORRECTIVE CHANGES (repository only, no deployment)
 =============================================================
 Date: 2026-10-17 | Branch: arena/e59698ee-latest-version-of-newssparkle
@@ -75,6 +169,10 @@ default-privilege statements, so the old design fails here (it did: the new
 tests were red until the migration was added) and any future function that
 forgets its revoke fails too.
 
+Applied at creation: the same least-privilege statements are also in every
+migration that creates one of these functions, so no intermediate `db push`
+boundary is exposed. See the review follow-up at the top of this report.
+
 Regression tests:
   - "locks down the RPCs …" (11 signatures, anon+authenticated denied);
   - "grants each privileged function only to the role that calls it";
@@ -112,11 +210,23 @@ auto-publish-every-4h, the three editions, breaking-news-monitor and
 notifications-dispatcher are never active at any intermediate state. Names,
 schedules and commands are unchanged.
 
+Wording check (review follow-up): only the EIGHT gated jobs are intentionally
+created inactive; the SIX safe jobs (ingest-feeds, trend-watch, phase6-monitor,
+validate-feeds-daily, prune-post-view-events, prune-automation) are active from
+the moment they are created, via cron.schedule(). Five of the eight gated jobs
+are first created in 20261015120200 (the three editions, breaking-news-monitor,
+notifications-dispatcher) and three in 20261016090100 (write-desk,
+publish-scheduler, newsroom-maintenance). The legacy auto-publish-every-4h in
+20260503120747 is created inactive too and is retired by the Phase 6 migration.
+An earlier one-line report said "every job in the initial chain is born
+inactive"; that was shorthand and wrong, and the repo-integrity test title that
+repeated it has been corrected.
+
 Regression tests:
   - "never leaves a publishing-capable job active at any point in the chain":
     re-runs the whole chain file by file and inspects cron.job after EVERY file;
-  - repo-integrity: "creates every job through the API that can express
-    inactive" (no cron.schedule() for a non-safe name anywhere);
+  - repo-integrity: "creates every gated job through `schedule_in_database`,
+    never `cron.schedule()`" (no cron.schedule() for a non-safe name anywhere);
   - mutation-checked: flipping one `active := false` to `true` fails the runtime
     test with the exact file name.
 
@@ -129,7 +239,7 @@ Corrected:
     rewritten to name all three and their roles;
   - checklist/OPERATIONS: newsroom_base_url is REQUIRED, not "a convenience";
   - OPERATIONS: the allow-list claim is now true (F3) and says how it works;
-  - both docs: 13 -> 14 migrations; 19 -> 27 tests;
+  - both docs: 13 -> 14 migrations; 19 -> 30 tests;
   - both docs: Vault step moved before `db push` (C1-C3 -> B1) and the
     execution order is stated at the top of section B;
   - docs/ci-workflow.pending.yml: the CI fallback URL was the old project.
@@ -164,7 +274,7 @@ supabase/migrations/20261015120200_reschedule_auto_publish_18_per_day.sql  F4
 supabase/migrations/20260503120747_10533559-…-8078a344b3f7.sql  F4
 src/test/harness/cron-contract.ts            gate, rationale, extractor
 src/test/harness/sql-staging.ts              platform ACLs + faithful alter_job
-src/test/phase6-sql.test.ts                  +8 tests (27 total)
+src/test/phase6-sql.test.ts                  +8 tests Phase 0, +3 follow-up (30)
 src/test/repo-integrity.test.ts              +3 tests (30 total)
 src/test/phase6-orchestration.test.ts        time bomb (out of scope, above)
 phase6_activation_checklist.txt              F1/F3/F5 + counts
@@ -176,7 +286,7 @@ EVIDENCE (commands run here, all local)
 ---------------------------------------
 npm run verify               -> exit 0; 12 test files / 218 tests; build OK
 npm run check:functions      -> exit 0; 13/13 entrypoints, deno 2.9.6
-npx vitest run src/test/phase6-sql.test.ts          -> 27 passed
+npx vitest run src/test/phase6-sql.test.ts          -> 30 passed
 npx vitest run src/test/repo-integrity.test.ts      -> 30 passed
 npx vitest run src/test/phase6-orchestration.test.ts-> 31 passed
 Mutation checks (reverted immediately):

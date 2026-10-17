@@ -256,9 +256,10 @@ describe("the Phase 6 cron gate is one statement in four places", () => {
     expect(normaliseSql(read(MIGRATION))).toMatch(/select cron\.alter_job\(jobid, active => false\)/);
   });
 
-  it("creates every job through the API that can express `inactive`", () => {
-    // F4: no migration may create a job with cron.schedule() unless the job is
-    // in the safe set — cron.schedule() always inserts active.
+  it("creates every gated job through `schedule_in_database`, never `cron.schedule()`", () => {
+    // F4: only the eight gated jobs are created inactive; the six safe jobs are
+    // active from the start. No migration may create a non-safe job with
+    // cron.schedule(), which always inserts active.
     const offenders: string[] = [];
     for (const file of walk("supabase/migrations", [".sql"])) {
       const text = stripComments(read(file));

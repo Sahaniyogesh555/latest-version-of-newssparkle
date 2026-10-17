@@ -78,8 +78,12 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.increment_post_views(text, text) FROM public;
-GRANT EXECUTE ON FUNCTION public.increment_post_views(text, text) TO anon, authenticated;
+-- Revoke by role, not just from PUBLIC: Supabase granted EXECUTE to anon,
+-- authenticated and service_role when this function was created, and only an
+-- explicit per-role revoke takes those grants away. service_role keeps it so
+-- the edge functions can count server-side views.
+REVOKE ALL ON FUNCTION public.increment_post_views(text, text) FROM public, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.increment_post_views(text, text) TO anon, authenticated, service_role;
 
 -- 5. Verification helper — run this after applying:
 --    SELECT grantee, privilege_type

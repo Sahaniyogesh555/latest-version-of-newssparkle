@@ -235,12 +235,35 @@ don't own it".
 `cron.unschedule('jobname')` is the permanent version and is what the migration
 uses before it re-creates a job.
 
+### Function privileges
+
+Supabase grants `EXECUTE` on every new function in `public` to `anon`,
+`authenticated` and `service_role` **at creation time**, so
+`revoke ... from public` on its own leaves those per-role grants in place. That
+is why every migration that creates a `SECURITY DEFINER` function also revokes
+the four roles and grants back only the callers it needs — in the same file, not
+in a later one. `db push` commits each file separately, so applying the lock
+down in a later migration would leave a window in which the public anon key
+could call the publishing triggers.
+
+| Function | Executable by |
+| --- | --- |
+| `increment_post_views(text, text)` | `anon`, `authenticated`, `service_role` |
+| `record_alert`, `claim_ingested_items`, `category_published_count`, `newsroom_llm_calls_today`, `newsroom_status` | `service_role` |
+| `prune_post_view_events`, `prune_automation_tables` | `postgres` (pg_cron), `service_role` |
+| `newsroom_trigger`, `trigger_auto_publish`, `trigger_breaking_news_monitor`, `trigger_notifications_dispatcher` | `postgres` (pg_cron) only |
+
+`20261017090000_phase6_privileges_and_gate_repair.sql` re-asserts the same
+matrix. It exists for projects that already applied the earlier versions of
+these files; on a fresh install it changes nothing.
+
 ### First activation (the Phase 6.1 gate)
 
-The migration creates publishing, alerting and maintenance jobs **inactive**,
-so `supabase db push` on a fresh project fails closed: nothing that can publish,
-spend LLM budget, alert readers or archive content can run before you have been
-through this list. Do it in order.
+The migration creates the eight gated jobs **inactive** and the six safe jobs
+**active** (8 inactive / 6 active, checked in step A1). So `supabase db push` on
+a fresh project fails closed: nothing that can publish, spend LLM budget, alert
+readers or archive content can run before you have been through this list. Do it
+in order.
 
 ```bash
 # 0. Create BOTH Vault rows first (see section 2). The base URL is required:
@@ -422,7 +445,22 @@ select policyname, cmd from pg_policies
  where schemaname = 'public' and tablename = 'posts';
 -- expect SELECT policies only
 
--- 3. view counting still works (returns without error)
+-- 3. no privileged RPC is reachable with the public anon key
+select p.oid::regprocedure::text as signature,
+       case when a.grantee = 0 then 'PUBLIC' else pg_get_userbyid(a.grantee) end as grantee
+  from pg_proc p
+  join pg_namespace n on n.oid = p.pronamespace
+  cross join lateral aclexplode(
+    coalesce(p.proacl, acldefault('f', p.proowner))
+  ) a
+ where n.nspname = 'public'
+   and p.prosecdef
+   and a.privilege_type = 'EXECUTE'
+ order by 1, 2;
+-- expect anon/authenticated on increment_post_views only; service_role on the
+-- data RPCs and the prunes; postgres alone on the four HTTP triggers.
+
+-- 4. view counting still works (returns without error)
 select public.increment_post_views(
   (select slug from public.posts where status = 'published' limit 1), 'test-visitor-id');
 ```

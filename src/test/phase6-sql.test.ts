@@ -368,6 +368,198 @@ describe("schema objects", () => {
   });
 });
 
+describe("privilege boundaries across the migration chain", () => {
+  /**
+   * The deliberate privilege policy, per SECURITY DEFINER function.
+   *
+   *   postgres       owner, and the role pg_cron runs the job as
+   *   service_role   the edge functions (they hold the service key)
+   *   anon, authenticated  the public API roles: only the view counter
+   *
+   * `db push` applies one file per transaction, so the check below runs this
+   * policy against the catalog after EVERY file — not only at the end of the
+   * chain. A migration that creates a privileged function without locking it
+   * down fails here, at the boundary where it happens.
+   */
+  /** regprocedure renders `timestamptz` as `timestamp with time zone`. */
+  const normaliseSignature = (signature: string) =>
+    signature
+      .replace(/^public\./, "")
+      .replace(/timestamp with time zone/g, "timestamptz")
+      .replace(/timestamp without time zone/g, "timestamp");
+
+  /**
+   * Signatures that exist for part of the chain only. `increment_post_views(text)`
+   * is the original 1-argument counter; 20260503120252 replaces it with a
+   * SECURITY INVOKER version, so it is no longer a privileged function at the
+   * end of the chain — but the early boundaries still have to be checked.
+   */
+  const RETIRED_SIGNATURES = ["increment_post_views(text)"];
+
+  const EXPECTED: Record<string, string[]> = {
+    // The one deliberate public RPC. (The 1-argument overload existed before
+    // 20260503120252 replaced it with a SECURITY INVOKER version.)
+    "increment_post_views(text)": ["anon", "authenticated", "postgres", "service_role"],
+    "increment_post_views(text,text)": ["anon", "authenticated", "postgres", "service_role"],
+    // Retention: pg_cron and the monitor only.
+    "prune_post_view_events()": ["postgres", "service_role"],
+    "prune_automation_tables()": ["postgres", "service_role"],
+    // Data RPCs called by the edge functions with the service key.
+    "record_alert(text,text,text,text,jsonb)": ["postgres", "service_role"],
+    "claim_ingested_items(integer)": ["postgres", "service_role"],
+    "category_published_count(text,timestamptz)": ["postgres", "service_role"],
+    "newsroom_llm_calls_today()": ["postgres", "service_role"],
+    "newsroom_status()": ["postgres", "service_role"],
+    // HTTP triggers: they make the database send a request carrying the Vault
+    // secret, so pg_cron is the only caller. service_role is excluded on
+    // purpose.
+    "newsroom_trigger(text,jsonb,integer)": ["postgres"],
+    "trigger_auto_publish(text)": ["postgres"],
+    "trigger_breaking_news_monitor()": ["postgres"],
+    "trigger_notifications_dispatcher()": ["postgres"],
+  };
+
+  it("applies least privilege after every migration, not just at the end", async () => {
+    const db = await freshPlatformDb();
+    try {
+      const failures: string[] = [];
+      const files = migrationFiles();
+
+      for (const file of files) {
+        await db.exec(prepareMigrationSql(readMigration(file)).sql);
+
+        // aclexplode rather than has_function_privilege: postgres is the
+        // superuser in this harness, so a superuser check would always say
+        // yes and would not show what the ACL actually grants. aclexplode
+        // reports the stored grants, including the owner's own entry.
+        const granted = await rows<{ signature: string; grantee: string }>(
+          db,
+          `select p.oid::regprocedure::text as signature,
+                  case when a.grantee = 0 then 'PUBLIC'
+                       else pg_get_userbyid(a.grantee) end as grantee
+             from pg_proc p
+             join pg_namespace n on n.oid = p.pronamespace
+             cross join lateral aclexplode(
+               coalesce(p.proacl, acldefault('f', p.proowner))
+             ) a
+            where n.nspname = 'public'
+              and p.prosecdef
+              and a.privilege_type = 'EXECUTE'
+            order by 1, 2`,
+        );
+
+        const byFunction = new Map<string, Set<string>>();
+        for (const row of granted) {
+          const signature = normaliseSignature(row.signature);
+          const roles = byFunction.get(signature) ?? new Set<string>();
+          roles.add(row.grantee);
+          byFunction.set(signature, roles);
+        }
+
+        for (const [signature, roles] of byFunction) {
+          const expected = EXPECTED[signature];
+          if (!expected) {
+            failures.push(
+              `${file}: ${signature} is a SECURITY DEFINER function with no declared privilege policy`,
+            );
+            continue;
+          }
+          const actual = [...roles].sort();
+          const wanted = [...expected].sort();
+          if (actual.join(",") !== wanted.join(",")) {
+            failures.push(`${file}: ${signature} grants [${actual.join(", ")}] but must grant [${wanted.join(", ")}]`);
+          }
+          if (roles.has("PUBLIC")) {
+            failures.push(`${file}: ${signature} is executable by PUBLIC`);
+          }
+        }
+
+        // The review criterion, stated directly: at no boundary may a public
+        // role reach a privileged function other than the view counter.
+        for (const [signature, roles] of byFunction) {
+          for (const role of ["anon", "authenticated"]) {
+            if (roles.has(role) && !(EXPECTED[signature] ?? []).includes(role)) {
+              failures.push(`${file}: ${role} can execute ${signature} at this boundary`);
+            }
+          }
+        }
+      }
+
+      expect(failures).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  }, 180_000);
+
+  it("keeps the real callers working and refuses the public roles", async () => {
+    // ACLs are necessary but not sufficient: prove the roles that must call
+    // these functions still can, and that the public roles get "permission
+    // denied" rather than a silent success.
+    const db = await freshPlatformDb();
+    try {
+      for (const file of migrationFiles()) {
+        await db.exec(prepareMigrationSql(readMigration(file)).sql);
+      }
+
+      // service_role — the edge functions' role.
+      await db.exec("set role service_role");
+      await db.exec("select public.record_alert('review_probe', 'post-migration probe')");
+      expect(await scalar<boolean>(db, "select public.newsroom_status() is not null")).toBe(true);
+      await db.exec("reset role");
+
+      // pg_cron's role — it owns every function, so EXECUTE is implied.
+      await db.exec("set role postgres");
+      await db.exec("select public.prune_post_view_events()");
+      await db.exec("reset role");
+
+      // The public roles: the view counter works, everything else is denied.
+      for (const role of ["anon", "authenticated"]) {
+        await db.exec(`set role ${role}`);
+        await db.exec("select public.increment_post_views('review-probe-no-such-slug', 'review-probe-visitor')");
+        await expect(
+          db.exec("select public.newsroom_status()"),
+          `${role} must be denied newsroom_status()`,
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          db.exec("select public.trigger_auto_publish('morning')"),
+          `${role} must be denied trigger_auto_publish()`,
+        ).rejects.toThrow(/permission denied/);
+        await db.exec("reset role");
+      }
+    } finally {
+      await db.close();
+    }
+  }, 180_000);
+
+  it("declares a policy for every SECURITY DEFINER function the chain produces", async () => {
+    // Guards the table above: a function added later without an entry would
+    // otherwise be reported only by the boundary test, one file at a time.
+    const db = await freshPlatformDb();
+    try {
+      for (const file of migrationFiles()) {
+        await db.exec(prepareMigrationSql(readMigration(file)).sql);
+      }
+      const signatures = await rows<{ signature: string }>(
+        db,
+        `select p.oid::regprocedure::text as signature
+           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'public' and p.prosecdef
+          order by 1`,
+      );
+      const present = signatures.map((row) => normaliseSignature(row.signature));
+      const undeclared = present.filter((signature) => !(signature in EXPECTED));
+      expect(undeclared, "every SECURITY DEFINER function needs a policy entry").toEqual([]);
+
+      const vanished = Object.keys(EXPECTED).filter(
+        (signature) => !present.includes(signature) && !RETIRED_SIGNATURES.includes(signature),
+      );
+      expect(vanished, "policy entries that no longer match a real function").toEqual([]);
+    } finally {
+      await db.close();
+    }
+  }, 180_000);
+});
+
 describe("candidate queue RPC", () => {
   it("claims the highest-priority candidate exactly once", async () => {
     await staging.db.exec(`

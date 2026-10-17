@@ -101,7 +101,10 @@ begin
 end;
 $$;
 
-revoke all on function public.newsroom_trigger(text, jsonb, integer) from public;
+-- The trigger attaches the Vault automation secret and posts on behalf of
+-- this project. pg_cron (postgres) is its only legitimate caller.
+revoke all on function public.newsroom_trigger(text, jsonb, integer) from public, anon, authenticated, service_role;
+grant execute on function public.newsroom_trigger(text, jsonb, integer) to postgres;
 
 -- Backwards compatibility with the Phase-5 helpers.
 create or replace function public.trigger_auto_publish(slot text)
@@ -113,6 +116,9 @@ as $$
   select public.newsroom_trigger('auto-publish', jsonb_build_object('slot', slot));
 $$;
 
+revoke all on function public.trigger_auto_publish(text) from public, anon, authenticated, service_role;
+grant execute on function public.trigger_auto_publish(text) to postgres;
+
 create or replace function public.trigger_breaking_news_monitor()
 returns bigint
 language sql
@@ -122,6 +128,9 @@ as $$
   select public.newsroom_trigger('breaking-news-monitor', '{}'::jsonb, 120000);
 $$;
 
+revoke all on function public.trigger_breaking_news_monitor() from public, anon, authenticated, service_role;
+grant execute on function public.trigger_breaking_news_monitor() to postgres;
+
 create or replace function public.trigger_notifications_dispatcher()
 returns bigint
 language sql
@@ -130,6 +139,9 @@ set search_path = public
 as $$
   select public.newsroom_trigger('notifications-dispatcher', '{}'::jsonb, 60000);
 $$;
+
+revoke all on function public.trigger_notifications_dispatcher() from public, anon, authenticated, service_role;
+grant execute on function public.trigger_notifications_dispatcher() to postgres;
 
 -- ---------------------------------------------------------------------------
 -- 2. Replace the previous schedule

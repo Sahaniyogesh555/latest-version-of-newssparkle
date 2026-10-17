@@ -36,7 +36,10 @@ AS $$
    WHERE view_day < (now() AT TIME ZONE 'UTC')::date - INTERVAL '90 days';
 $$;
 
-REVOKE ALL ON FUNCTION public.prune_post_view_events() FROM public;
+-- Retention runs from pg_cron (postgres) and the monitor (service_role). No
+-- API role may force a delete, so revoke the grants Supabase added at creation.
+REVOKE ALL ON FUNCTION public.prune_post_view_events() FROM public, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.prune_post_view_events() TO postgres, service_role;
 
 -- Best-effort nightly cleanup (pg_cron is already enabled by the first migration).
 DO $$
