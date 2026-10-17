@@ -57,6 +57,16 @@ RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   UPDATE public.posts SET views = views + 1 WHERE slug = post_slug;
 $$;
 
+-- Least privilege, applied at creation time. Supabase's default privileges
+-- grant EXECUTE on every new function in public to anon, authenticated and
+-- service_role, so `revoke ... from public` alone leaves those per-role grants
+-- in place. The view counter is the only function the public may call.
+REVOKE ALL ON FUNCTION public.increment_post_views(text) FROM public, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.increment_post_views(text) TO anon, authenticated, service_role;
+
+-- Trigger helper: not a callable RPC for any API role.
+REVOKE ALL ON FUNCTION public.touch_updated_at() FROM public, anon, authenticated, service_role;
+
 -- Seed 6 categories
 INSERT INTO public.categories (name, slug, description, color) VALUES
 ('World', 'world', 'Global affairs, geopolitics, diplomacy and international events.', '#dc2626'),

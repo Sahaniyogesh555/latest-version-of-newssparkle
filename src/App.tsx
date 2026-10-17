@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { lazy, Suspense } from "react";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { lazy, Suspense, useEffect } from "react";
 
 // Lazy load heavy pages
 const Index = lazy(() => import("./pages/Index.tsx"));
@@ -34,35 +35,46 @@ const PageLoader = () => (
   </div>
 );
 
+/**
+ * Resets the error boundary whenever the route changes, so one broken page
+ * cannot trap the reader until they hard-refresh.
+ */
+const RoutedErrorBoundary = ({ children }: { children: React.ReactNode }) => {
+  const location = useLocation();
+  return <ErrorBoundary key={location.pathname}>{children}</ErrorBoundary>;
+};
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <Suspense fallback={<PageLoader />}>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            <Route path="/category/:slug" element={<CategoryPage />} />
-            <Route path="/post/:slug" element={<PostPage />} />
-            <Route path="/about" element={<About />} />
-            <Route path="/contact" element={<Contact />} />
-            <Route path="/privacy" element={<Privacy />} />
-            <Route path="/privacy-policy" element={<Privacy />} />
-            <Route path="/terms" element={<Terms />} />
-            <Route path="/disclaimer" element={<Disclaimer />} />
-            <Route path="/faq" element={<FAQ />} />
-            <Route path="/brand" element={<Brand />} />
-            <Route path="/editorial-policy" element={<EditorialPolicy />} />
-            <Route path="/corrections" element={<Corrections />} />
-            <Route path="/authors" element={<Authors />} />
-            <Route path="/author/:slug" element={<AuthorPage />} />
-            <Route path="/search" element={<Search />} />
-            <Route path="/tag/:tag" element={<TagPage />} />
-            <Route path="/bookmarks" element={<Bookmarks />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Suspense>
+        <RoutedErrorBoundary>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/" element={<Index />} />
+              <Route path="/category/:slug" element={<CategoryPage />} />
+              <Route path="/post/:slug" element={<PostPage />} />
+              <Route path="/about" element={<About />} />
+              <Route path="/contact" element={<Contact />} />
+              <Route path="/privacy" element={<Privacy />} />
+              <Route path="/privacy-policy" element={<Privacy />} />
+              <Route path="/terms" element={<Terms />} />
+              <Route path="/disclaimer" element={<Disclaimer />} />
+              <Route path="/faq" element={<FAQ />} />
+              <Route path="/brand" element={<Brand />} />
+              <Route path="/editorial-policy" element={<EditorialPolicy />} />
+              <Route path="/corrections" element={<Corrections />} />
+              <Route path="/authors" element={<Authors />} />
+              <Route path="/author/:slug" element={<AuthorPage />} />
+              <Route path="/search" element={<Search />} />
+              <Route path="/tag/:tag" element={<TagPage />} />
+              <Route path="/bookmarks" element={<Bookmarks />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </Suspense>
+        </RoutedErrorBoundary>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

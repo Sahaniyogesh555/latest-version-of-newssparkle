@@ -1,0 +1,5 @@
+# SPA fallback. Without this, a hard refresh on /post/<slug>, /category/<slug>,
+# /author/<slug> or any other client route returns a 404 from the host.
+# Supported by Netlify and Cloudflare Pages; ignored by hosts that do their own
+# rewriting (Lovable, Vercel — see docs/OPERATIONS.md).
+/*    /index.html   200

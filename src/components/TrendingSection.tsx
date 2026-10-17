@@ -33,7 +33,7 @@ export function TrendingSection({ posts }: Props) {
                 className="group flex flex-col card-base p-4 hover:shadow-elevated transition-all"
               >
                 <div className="flex items-center gap-2 mb-3">
-                  <span className="font-serif text-2xl font-black text-byline/30">
+                  <span className="font-serif text-2xl font-black text-byline">
                     #{String(i + 1).padStart(2, "0")}
                   </span>
                 </div>

@@ -1,0 +1,651 @@
+PHASE 6.1 AUDIT — PRODUCTION ACTIVATION CHECKLIST
+==================================================
+Audited: 2026-10-15 (revised 2026-10-17 for the new project)
+Branch: arena/e59698ee-latest-version-of-newssparkle
+Target project ref: xuqxautmflofkvbsaanh   (NewsSparkle, ap-south-1, PostgreSQL 17.11)
+Previous project:   ruusbjlabbojpbawbphc — the ref still baked into .env,
+                    supabase/config.toml and supabase/migrations until the
+                    Phase 5 cutover. Do not confuse the two: steps A1/B1 link
+                    to the TARGET project.
+Status of this document: nothing here has been executed against the live
+project. Every step is labelled PASS (verified locally with real engines, or
+proven by reading the code) or BLOCKED (needs the real dashboard/CLI and
+credentials this environment does not have).
+
+How to read a step: DO (exact command) -> EXPECT (what proves it worked) ->
+IF IT FAILS (the stop/rollback action). Do not continue past a failed step.
+
+--------------------------------------------------------------------------------
+SECTION 0 — WHAT IS ALREADY VERIFIED (do not redo)
+--------------------------------------------------------------------------------
+PASS  All 14 migrations apply in filename order against real PostgreSQL 18.6,
+      with only the pg_cron/pg_net/pgcrypto `create extension` lines stubbed.
+      src/test/phase6-sql.test.ts (30 tests, Phase 0 correction commit) - the
+      same commit that produced this document's numbers.
+      HISTORICAL: the chain passed with 12 files at the 6.1 audit (9cd5cc0)
+      and with 13 at the gate correction (eb1b0f0). Neither run covers
+      migration 20261017090000; only the run named above does.
+PASS  All four Phase 6 migrations are re-runnable (idempotent): re-applying
+      them keeps 24 sources at 24 and 14 cron jobs at 14, and leaves the gate
+      at 8 inactive / 6 active.
+PASS  Privileges now match a real project: Supabase's default privileges are
+      modelled in the test harness, and no SECURITY DEFINER function is
+      executable by anon/authenticated except increment_post_views. The
+      publishing triggers are executable only by `postgres` (pg_cron).
+PASS  The cron gate uses cron.alter_job, the API the platform permits; a test
+      proves a SELECT-only role cannot UPDATE cron.job and that no migration
+      reintroduces that form.
+PASS  No publishing-capable job is active at any intermediate point of the
+      migration chain (every file prefix is asserted).
+PASS  RLS/privileges: anon + authenticated hold no SELECT/INSERT on any
+      automation table; posts keeps its published-only read policy.
+PASS  The 7 service-role RPCs are SECURITY DEFINER with a pinned search_path.
+PASS  The 14 cron commands/schedules/timeouts in the database match the
+      migration string for string.
+PASS  The Vault trigger sends `Authorization: Bearer <auto_publish_secret>` to
+      <newsroom_base_url>/functions/v1/<function>; no secret in any URL or file.
+PASS  All 13 edge function entrypoints type-check on real Deno 2.9.6
+      (`npm run check:functions`); no function uses a browser-only global.
+PASS  The written-then-published flow: a fresh story is never immediately live,
+      and forcing its slot releases exactly one article.
+      src/test/phase6-orchestration.test.ts (31 tests).
+PASS  The pause/resume/emergency-stop SQL used below is valid and flips exactly
+      the intended job rows (phase6-sql.test.ts).
+BLOCKED  Everything downstream of "does the live project behave the same":
+      migrations applied, functions deployed, Vault contents, secret values,
+      real feed reachability, real model output, pg_cron actually ticking.
+
+--------------------------------------------------------------------------------
+SECTION A — PRE-FLIGHT (read-only, no changes)
+--------------------------------------------------------------------------------
+A1. Confirm you are pointed at the right project.
+    DO     supabase projects list   |   or read project_id in supabase/config.toml
+    EXPECT project_id = xuqxautmflofkvbsaanh after the Phase 0 link step. Until the cutover,
+           supabase/config.toml still says ruusbjlabbojpbawbphc — the old
+           project — and `supabase link` overrides it for every CLI command.
+    NOTE   Three refs exist in the repo. xuqxautmflofkvbsaanh is the target;
+           ruusbjlabbojpbawbphc is the previous project, still referenced by
+           .env, config.toml and the migration chain; gjmmnqtfvnjlwzqwzrzu
+           appears only inside a historical migration and a legacy JWT
+           (Section F). A repo-integrity test now forbids the first two inside
+           the Phase 6 runtime files.
+    BLOCKED until the CLI is authenticated on your machine.
+
+A2. Record the "before" state so you can prove what changed.
+    DO     select count(*) filter (where status='published') as published,
+                  count(*) filter (where status='scheduled') as scheduled
+             from public.posts;
+           select jobid, jobname, schedule, active from cron.job order by jobname;
+           select extversion from pg_extension where extname = 'pg_cron';
+    EXPECT Before step B1 the cron query errors (relation cron.job missing) —
+           that is normal on a project that has never run Phase 6. After B1 you
+           must see exactly 14 rows, and the two counts below must be 8 and 6.
+    NOTE   Record extversion. It matters in TWO DIFFERENT CASES, and they must
+           not be conflated:
+             (a) EXISTING project whose Phase 6 cron migration was already
+                 applied: the jobs exist, and the repair migrations
+                 20261016090200 + 20261017090000 (plus B2) close the gate with
+                 cron.alter_job. That path needs no cron.schedule_in_database,
+                 but it does need cron.alter_job - pg_cron 1.4+, the same floor
+                 as (b). Older versions cannot be repaired by this chain; see
+                 the note at the end of this step.
+             (b) FRESH INSTALL (no Phase 6 jobs yet): the cron migration
+                 20261016090100 creates the eight gated jobs with
+                 cron.schedule_in_database(..., active := false). That function
+                 exists from pg_cron 1.4 (2021; expect 1.6.x here). If the
+                 project's pg_cron is older, the migration FAILS at that
+                 statement - the repair migration does NOT rescue this case,
+                 because `db push` stops before it runs and there are no rows
+                 for it to update. Verify BEFORE the first push:
+                   select extversion from pg_extension where extname = 'pg_cron';
+                 If it is < 1.4, update the extension (or the platform plan) so
+                 the version is available first; do not hand-create the jobs.
+           VERSION FLOOR, BOTH CASES: pg_cron 1.4. Fresh installs need
+           cron.schedule_in_database (1.4+); existing projects need
+           cron.alter_job (1.4+). Every Supabase project on PostgreSQL 13+
+           ships 1.6.x, but read extversion before you start - if it is below
+           1.4, this chain cannot run and no workaround exists inside SQL.
+    BLOCKED (needs dashboard/SQL editor).
+
+--------------------------------------------------------------------------------
+SECTION B — APPLY MIGRATIONS AND PAUSE, IN THIS ORDER
+--------------------------------------------------------------------------------
+For a NEW project the safe order is C1-C3 (Vault) -> B1 (push) -> B2 (verify
+the gate). The sections are numbered by topic, not by execution order; this
+line is the execution order.
+B1. Apply the migrations.
+    PREREQUISITE  Complete C1-C3 first: the two Vault rows must exist BEFORE
+           this push. `newsroom_base_url` is no longer optional (C3), and
+           without it every cron job fails closed instead of guessing a host.
+    DO     supabase link --project-ref xuqxautmflofkvbsaanh
+           supabase db push
+    EXPECT 14 migrations applied, 0 errors (the last two,
+           20261016090200_phase6_activation_gate.sql and
+           20261017090000_phase6_privileges_and_gate_repair.sql, are no-ops on
+           a fresh install: 20261016090100 already created the gate set
+           inactive and the privilege repair is idempotent).
+           The Phase 6 cron migration creates
+           the eight jobs that can publish, queue with LLM budget, alert readers
+           or archive published content INACTIVE (cron.schedule_in_database
+           with active := false), so no such job can run before you finish this
+           checklist. Only the six safe jobs start running: ingestion, trend
+           watch, the health monitor, feed validation and the two prunes.
+    IF IT FAILS
+           - Error on an already-applied migration: nothing to do, it is
+             recorded in supabase_migrations.schema_migrations.
+           - `function cron.schedule_in_database(...) does not exist`: a FRESH
+             install on a pg_cron older than 1.4 (see the A2 note). The repair
+             migration cannot fix this - it only updates rows that already
+             exist. Get pg_cron 1.4+ available, then re-run the push. Assert
+             the real state first, do not assume:
+               select extversion from pg_extension where extname = 'pg_cron';
+               select count(*) from cron.job;   -- expected 14 after a clean B1
+             If that count is 0, the fail-closed reading is: nothing is
+             publishing, and nothing is ingesting or monitoring either. Safe,
+             but not self-healing - fix the version and push again.
+           - Error inside 20261016090000_phase6_autonomy_schema.sql: stop, do
+             not retry blindly. That file is idempotent (create if not exists,
+             add column if not exists), and the failing statement is reported
+             verbatim by `db push`.
+           - Rollback: nothing in Phase 6 drops or rewrites existing posts. The
+             only destructive-looking statements are `drop constraint if
+             exists posts_status_check` (re-created in the same transaction) and
+             `drop trigger if exists ... touch_updated_at` (re-created). To
+             fully back out, pause all jobs (B2) and restore from your Supabase
+             backup; do not `drop schema`.
+    BLOCKED (needs CLI + DB password).
+
+B2. Verify the gate — and close it if this project applied an older revision.
+    The migration already closed it, so this step is a verification plus an
+    idempotent repair (a running statement, not a promise). It serves the
+    EXISTING-project case: if the project was migrated before the fail-closed
+    change, its jobs exist ACTIVE and this is what closes them. It does nothing
+    for the fresh-install case, where the version requirement sits in the cron
+    migration itself (see A2 note (b) and B1).
+    DO     select cron.alter_job(jobid, active => false)
+             from cron.job
+            where jobname in ('write-desk','publish-scheduler',
+                              'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                              'breaking-news-monitor','notifications-dispatcher',
+                              'newsroom-maintenance');
+    EXPECT select jobname, active from cron.job order by jobname;
+            -> 8 of 14 jobs inactive (gated) / 6 active (safe)
+           select count(*) filter (where active) as active,
+                  count(*) filter (where not active) as inactive from cron.job;
+            -> active 6, inactive 8
+           The 8 inactive rows must be exactly:
+             write-desk, publish-scheduler, auto-publish-morning,
+             auto-publish-midday, auto-publish-evening, breaking-news-monitor,
+             notifications-dispatcher, newsroom-maintenance
+           The 6 active rows must be exactly:
+             ingest-feeds, trend-watch, phase6-monitor, validate-feeds-daily,
+             prune-post-view-events, prune-automation
+
+    THE FOUR CLASSES OF JOB, AND WHY EACH IS WHERE IT IS
+    (a) publishing-capable — can end with a live article (5, all inactive):
+           publish-scheduler: the only code that sets status='published'
+             (pipeline.ts runPublishScheduler). Cron `*/10 * * * *`.
+           auto-publish-morning/midday/evening: step 3 of `auto-publish` calls
+             the same runPublishScheduler, so an edition run publishes real
+             articles. Cron `0 6|12|18 * * *`.
+           breaking-news-monitor: its whole job is to call auto-publish. `*/30`.
+    (b) content generation — cannot publish, but spends LLM budget and queues
+        posts a later run releases (1, inactive):
+           write-desk: writes status scheduled/review/rejected only, always with
+             published_at null, but a queued story goes live as soon as the
+             scheduler runs. Cron `*/30 * * * *`.
+    (c) reader-alert — publishes nothing, but writes reader-facing
+        notifications about a published post (1, inactive):
+           notifications-dispatcher: gated so a test article cannot ping
+             readers. Cron `*/10 * * * *`.
+    (d) destructive maintenance — mutates published content (1, inactive):
+           newsroom-maintenance: repairs broken featured images and archives
+             published posts older than 730 days with fewer than 50 views.
+             Gated until step B3 and G3 are done. Cron `40 * * * *`.
+    (e) safe-operational — neither publishes nor touches published content
+        (6, active): ingest-feeds (candidates only), trend-watch,
+        phase6-monitor (reads + writes alerts), validate-feeds-daily,
+        prune-post-view-events, prune-automation.
+
+    WHY cron.alter_job, NOT `update cron.job`
+           Supabase gives the `postgres` role SELECT only on cron.job
+           (supabase/postgres migration 20231020085357, re-applied whenever
+           pg_cron is created). A direct UPDATE therefore fails with
+           "permission denied for table job" — in the SQL editor and inside
+           `db push` alike. It is not a role problem and retrying will not help.
+           cron.alter_job(job_id, schedule, command, database, username, active)
+           is the supported API from pg_cron 1.4: it runs as the extension
+           owner, changes only the arguments supplied (so schedules and
+           commands survive untouched), invalidates the job cache the same way
+           the UPDATE did, and is granted to `postgres` by Supabase. The
+           parameter is named `active`: a wrong name fails with
+           "function cron.alter_job(bigint, active => boolean) does not exist".
+           It also only touches jobs you own — you run it as `postgres`, which
+           created them, so this is automatic; a different role gets
+           "Job N does not exist or you don't own it".
+    IF IT FAILS
+           - "permission denied for table job": you used the UPDATE form. Use
+             the alter_job statement above.
+           - "function cron.alter_job(bigint, active => boolean) does not
+             exist": pg_cron older than 1.4. Upgrade it (see A2 note (b)).
+           - Unsure who owns the jobs: select jobname, username, active from cron.job;
+           - Anything other than 8/6, or an unexpected job name: STOP. Do not
+             proceed to the dry run. Compare against
+             select jobname, schedule, active from cron.job order by jobname;
+             expected schedules are listed in docs/OPERATIONS.md section 3.
+    PASS (statement + row effect verified offline on PostgreSQL 18.6)
+    BLOCKED (live execution).
+
+B3. Maintenance pre-check — the operator's approval gate for G3.
+    DO     select slug, published_at, views from public.posts
+            where status = 'published'
+              and published_at < now() - interval '730 days'
+              and coalesce(views,0) < 50;
+    WHY    newsroom-maintenance archives posts older than 730 days with fewer
+           than 50 views (status -> 'archived'). Archived posts disappear from
+           the site, sitemaps and feeds, because both RLS and the frontend
+           filter on status='published'. It also replaces featured images whose
+           URL no longer answers.
+           The job is INACTIVE after the migration, and it stays inactive until
+           you run the separate activation step G3 in this document — after
+           looking at the rows this query returns.
+    EXPECT On a young site: 0 rows -> nothing to archive; proceed normally.
+           If it returns rows you consider evergreen, either raise
+           MAINTENANCE_RULES.archiveAfterDays (supabase/functions/_shared/
+           maintenance.ts, then redeploy `maintenance`) or leave
+           `newsroom-maintenance` inactive indefinitely: ingestion, writing,
+           publishing and monitoring all work without it.
+    SEE    The maintenance activation step is G3 in SECTION G. It is separate
+           from the publishing activation on purpose: publishing and archiving
+           fail in opposite directions, and one operator decision must not
+           authorise both.
+    BLOCKED (needs live data).
+
+--------------------------------------------------------------------------------
+SECTION C — SECRETS (VALUES NEVER GO IN THE REPO OR IN THIS FILE)
+--------------------------------------------------------------------------------
+C1. Generate one automation secret.
+    DO     openssl rand -hex 32
+    KEEP   The value in your password manager. Never commit it, never paste it
+           into an issue, never put it in a URL.
+
+C2. Put the SAME value in two places. These two MUST MATCH exactly.
+    DO     Vault (read by pg_cron at run time):
+             select vault.create_secret('<value>', 'auto_publish_secret',
+                                        'NewsSparkle automation');
+           Function environment (checked by _shared/auth.ts on every call):
+             supabase secrets set AUTO_PUBLISH_SECRET=<same value>
+    MUST MATCH: vault `auto_publish_secret`  <->  function AUTO_PUBLISH_SECRET.
+    WHY    pg_cron reads Vault and sends the value in the Authorization header;
+           the functions compare what they receive against the env var. If they
+           differ, every cron call is 401 (fails closed: nothing publishes).
+    OPTIONAL same-value extra: CRON_SECRET (legacy alias still accepted by
+           breaking-news-monitor / notifications-dispatcher / validate-feeds).
+    EXPECT select name from vault.decrypted_secrets
+            where name in ('auto_publish_secret','newsroom_base_url');
+           -> auto_publish_secret present.
+
+C3. Second Vault entry: the base URL. REQUIRED, and it must be created BEFORE
+    the migrations (C3 comes before B1 in the safe order for a new project).
+    DO     select vault.create_secret('https://xuqxautmflofkvbsaanh.supabase.co',
+                                      'newsroom_base_url',
+                                      'NewsSparkle automation host');
+    WHY    The trigger builds `<base>/functions/v1/<function>` from this row.
+           There is NO fallback any more: if the row is missing or not an
+           https URL, newsroom_trigger raises and sends nothing. That is
+           deliberate — the old hard-coded fallback sent a project's cron
+           traffic, with its bearer token, to a different project. Without this
+           row every cron job fails, safely but noisily.
+           The function name is also checked against an allow-list, so a typo
+           cannot address an arbitrary endpoint.
+    EXPECT Both rows from C2/C3 present.
+
+C4. AI key and site origin in the function environment.
+    DO     supabase secrets set LOVABLE_API_KEY=<AI gateway key>
+           supabase secrets set SITE_URL=https://newssparkle.lovable.app
+    MUST MATCH: SITE_URL should equal the front end's VITE_SITE_URL, or
+           canonical URLs in feeds/JSON-LD will disagree with the site.
+    OPTIONAL   AI_BASE_URL / AI_MODEL (defaults api.openai.com/v1, gpt-4o-mini),
+           OPENAI_API_KEY or AI_API_KEY instead of LOVABLE_API_KEY,
+           AUTO_PUBLISH_URL (only used by breaking-news-monitor),
+           UNSPLASH_ACCESS_KEY / PEXELS_API_KEY (image quality; picsum is the
+           deterministic fallback, and nothing breaks without them).
+    Note about a missing AI key: the desk does NOT invent anything. It records
+    the alert "No AI key configured: the desk cannot write. Publishing is
+    paused, nothing is invented." and stops.
+    NOT NEEDED IN THE FUNCTION ENV: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+           SUPABASE_ANON_KEY — the platform injects these.
+    EXPECT Unauthenticated call to a function returns 401, and an authenticated
+           call does NOT return 500 "Server is not configured with an
+           automation secret."
+    BLOCKED (needs CLI + your key).
+
+C5. Front-end build variables (public by design; never put secrets here).
+    REPO   VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY, VITE_SITE_URL,
+           VITE_DEMO_MODE=false. Set in the host's build environment.
+    TRUTH  `.env` IS TRACKED IN GIT (it is not gitignored). It holds the old
+           project's URL plus its anon/publishable key — a client-side key that
+           is designed to be public, not a service-role key — and no AI, Vault
+           or automation secret. Updating it is therefore a normal reviewed
+           commit, not a local-only change; never add a real secret to it.
+           .env.example documents every name.
+    NOTE   VITE_DEMO_MODE=true serves local fixtures instead of the database —
+           never enable it in a deployed build.
+    BLOCKED (host dashboard).
+
+--------------------------------------------------------------------------------
+SECTION D — DEPLOY AND VERIFY THE FUNCTIONS
+--------------------------------------------------------------------------------
+D1. The 13 edge functions, by exact directory name:
+       auto-publish              breaking-news-monitor     ingest-feeds
+       maintenance               news-sitemap              notifications-dispatcher
+       phase6-monitor            publish-scheduler         rss
+       sitemap                   trend-watch               validate-feeds
+       write-desk
+    (supabase/functions/_shared is a module folder, not a function.)
+
+D2. Optional but recommended pre-flight, offline:
+    DO     npm ci && npm run verify && npm run check:functions
+    EXPECT typecheck + lint + 194 tests + build, then 13/13 entrypoints clean on
+           Deno. `npm run check:functions` self-skips (exit 0) if no deno binary
+           is installed; to force it: npm i -D deno.
+
+D3. Deploy. Supabase takes one command per function or a directory sweep.
+    DO     supabase functions deploy auto-publish breaking-news-monitor \
+             ingest-feeds maintenance news-sitemap notifications-dispatcher \
+             phase6-monitor publish-scheduler rss sitemap trend-watch \
+             validate-feeds write-desk
+           (or simply `supabase functions deploy`, which deploys every folder
+            under supabase/functions/ that has an index.ts)
+    EXPECT 13 deployments reported, no bundling/type error. A 401/403 here
+           means the CLI token lacks project access, not a code problem.
+    BLOCKED (needs CLI + personal access token).
+
+D4. Verify the gateway contract (public endpoints open, automation closed).
+    DO     for f in sitemap news-sitemap rss; do
+             curl -s -o /dev/null -w "$f %{http_code}\n" \
+               "https://xuqxautmflofkvbsaanh.supabase.co/functions/v1/$f"; done
+           curl -s -o /dev/null -w 'ingest-feeds %{http_code}\n' -X POST \
+             "https://xuqxautmflofkvbsaanh.supabase.co/functions/v1/ingest-feeds" -d '{}'
+    EXPECT 200 200 200 and 401.
+    WHY    This is the single most important safety property: a write-capable
+           endpoint that answers 200 without credentials can be triggered by
+           anyone. If it answers 200, stop and fix `verify_jwt` / requireSecret
+           before enabling anything.
+    IF IT FAILS  Do not enable the loop. Re-check supabase/config.toml
+           ([functions.ingest-feeds] verify_jwt = false is correct — the
+           function authenticates itself) and that the deployed revision is the
+           one from this repo.
+    BLOCKED (needs network access to the project).
+
+--------------------------------------------------------------------------------
+SECTION E — CONTROLLED DRY RUN (write exactly one article, by hand)
+--------------------------------------------------------------------------------
+Keep the Section B2 pause in force for all of E.
+
+E1. Ingest candidates (this job is already running on cron; do it by hand too).
+    DO     curl -sS -X POST ".../functions/v1/ingest-feeds" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+             -d '{"maxSources":3}' | jq '{ok, checked: .metrics.sources_checked,
+                                            rejected: .metrics.rejected, deduped: .metrics.deduped}'
+    EXPECT ok:true, checked 3, and a pipeline_runs row written.
+    IF IT FAILS
+       - 401 -> the secret mismatch in C2.
+       - 500 "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required" -> deploy
+         without the platform env; redeploy.
+       - ok:false with feed errors -> blocked/roamed feeds (expected for some
+         publishers from cloud IPs). Check which:
+         select name, consecutive_failures, disabled_until from public.content_sources
+          where consecutive_failures > 0 order by consecutive_failures desc;
+       - Verify candidates arrived:
+         select status, count(*) from public.ingested_items group by status;
+    BLOCKED (live).
+
+E2. Write ONE story.
+    DO     curl -sS -X POST ".../functions/v1/write-desk" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" -d '{"limit":1}' \
+             | jq '{ok, written: .itemsOut, llm: .llmCalls, errors}'
+    EXPECT ok:true, written 1, llm 2-4 (writer + verifier + alt text).
+    EXPECT then:  select slug, status, scheduled_for, quality_score, published_by,
+                         review_reason from public.posts order by created_at desc limit 3;
+                  -> status is 'scheduled' (score >= 75) or 'review' (55-74) or
+                     'rejected' (< 55 or a blocking rule). published_at IS NULL.
+                     published_by = 'automation'.
+    CRITICAL  write-desk cannot make anything public. Verified in code: the only
+              statuses it writes are scheduled / review / rejected
+              (pipeline.ts), and every public surface (RLS policy, every page,
+              the sitemaps, RSS) filters on status='published'.
+    IF IT FAILS
+       - written 0 with note "queue empty": E1 found nothing usable; widen the
+         ingest (more sources) or use a known-good feed.
+       - ok:false and the alert "No AI key configured": C4.
+       - LLM budget already spent: select public.newsroom_llm_calls_today();
+       - A 'review' verdict is a PASS, not a failure — it is the safety lane
+         working. Inspect review_reason before overriding anything.
+    BLOCKED (live; also depends on real model output).
+
+E3. Prove nothing published itself.
+    DO     select count(*) from public.posts
+            where status = 'published' and published_at > now() - interval '15 minutes';
+    EXPECT 0. (Both publishing crons are paused; this catches a pause that did
+           not take effect.)
+    IF IT FAILS  Stop. Re-check B2 and the cron output:
+           select j.jobname, j.active, r.status, r.return_message, r.start_time
+             from cron.job_run_details r join cron.job j using (jobid)
+            order by r.start_time desc limit 10;
+
+E4. Release exactly ONE story (the only publishing action in this checklist).
+    DO     update public.posts set scheduled_for = now() - interval '1 minute'
+            where slug = '<the slug from E2>';
+    WHY    The desk deliberately schedules a story one minimum gap (25 min) or
+           more into the future — measured 55 minutes for the midday edition —
+           so calling the scheduler immediately after E2 correctly returns
+           published: 0. Pull that single row forward instead of waiting.
+    DO     curl -sS -X POST ".../functions/v1/publish-scheduler" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" -d '{"limit":1}' \
+             | jq '{ok, published: .metrics.published, today: .metrics.published_today,
+                    slugs: .metrics.slugs}'
+    EXPECT ok:true, published 1, slugs: ["<slug>"].
+    EXPECT a SECOND identical call returns published 0 (nothing left due), and
+           the article is live at https://newssparkle.lovable.app/post/<slug>
+           (hard-refresh; it is a client-side route).
+    GATES THAT CAN STILL HOLD IT BACK (all intentional):
+           - min-gap 25 min since the last publication -> metrics.deferred > 0.
+           - daily cap 18 or category cap 5 -> the post is re-timed to tomorrow.
+           - burst limit 2 per run.
+           Check: select status, published_at, scheduled_for from public.posts
+                   where slug = '<slug>';
+    IF IT FAILS  Stop the loop (B2), do not "retry until it works". The gates
+           are the safety system; a refusal is information, not an obstacle.
+    ROLLBACK   Un-publish this one article without deleting it:
+                 update public.posts
+                    set status = 'scheduled', published_at = NULL,
+                        scheduled_for = now() + interval '1 day'
+                  where slug = '<slug>';
+               (Nothing else in the dry run needs rolling back: candidates and
+               drafts are inert.)
+    BLOCKED (live).
+
+E5. Monitor.
+    DO     curl -sS -X POST ".../functions/v1/phase6-monitor" \
+             -H "Authorization: Bearer $AUTO_PUBLISH_SECRET" \
+             | jq '{ok, autonomy, problems: .metrics.problems,
+                    hours_since_publish: .metrics.hours_since_publish}'
+    EXPECT Before the first publication the monitor legitimately reports
+           ok:false with "candidate queue empty and nothing scheduled" (and, for
+           a project with history, possibly "no publication in Nh"). After E4 it
+           should report ok:true, autonomy.level "high" or "medium".
+           Treat ok:false as a signal to read `problems`, never as a stop by
+           itself.
+    BLOCKED (live).
+
+--------------------------------------------------------------------------------
+SECTION F — THE LEGACY ANON JWT (assessment + safe rotation)
+--------------------------------------------------------------------------------
+FINDING (from the file itself, no secret material reproduced):
+    supabase/migrations/20260503120747_10533559-1488-404d-a686-8078a344b3f7.sql
+    embeds a JWT whose public claims are: role=anon, iss=supabase,
+    ref=gjmmnqtfvnjlwzqwzrzu, iat 2026-05-03, exp 2036-05-02. It is used as a
+    Bearer token for a net.http_post to
+    https://gjmmnqtfvnjlwzqwzrzu.supabase.co/functions/v1/auto-publish.
+
+IS ROTATION NECESSARY?  Not for the security of THIS project, but yes for
+hygiene of the other one:
+  - It is an `anon` key, which is public by design (every browser bundle of that
+    project shipped it).
+  - It is scoped to a DIFFERENT project (ref gjmmnqtfvnjlwzqwzrzu). PostgREST /
+    the gateway verify the project's JWT secret, so this token cannot
+    authenticate against the target project at all — it is inert here.
+  - The cron job that used it was superseded by
+    20261015120200_reschedule_auto_publish_18_per_day.sql, and the Phase 6
+    migration unschedules that job name explicitly.
+  - Therefore: NOT a blocker for activation (BLOCKED-as-unnecessary). It is a
+    live credential for the old project if that project still exists, so:
+      - if gjmmnqtfvnjlwzqwzrzu still exists and you do not use it -> delete it
+        (Dashboard -> that project -> Settings -> General -> Delete), which
+        retires the token outright;
+      - if you still use it -> rotate its anon key (below);
+      - either way, do NOT rewrite the migration (applied migrations are
+        history; the token is already in git history).
+
+SAFE ROTATION SEQUENCE — for the CURRENT project (xuqxautmflofkvbsaanh), only if
+you are deliberately rotating (e.g. before handing the project over). Rotating
+the anon key alone does NOT invalidate the service_role key or the JWT secret.
+    DO     1. Dashboard -> Settings -> API -> rotate the anon/publishable key.
+           2. Copy the new value into the FRONT END build env:
+              VITE_SUPABASE_PUBLISHABLE_KEY=<new value>  (host + .env locally)
+           3. Redeploy the front end (the old key keeps working until you do,
+              so there is no downtime if steps are done in this order).
+           4. Verify reads: homepage, a category page, an article page.
+    EXPECT Public pages load; no browser console 401s. Deep links still work.
+    IF IT FAILS  The previous key still works until both the front end is
+           redeployed AND the old key is revoked, so roll back by restoring the
+           old value in the host env and redeploying.
+    AVOID    Rotating the JWT secret (Settings -> API -> JWT secret) unless you
+             are prepared to re-issue every legacy key: it invalidates anon AND
+             service_role legacy keys at once, which breaks the running edge
+             functions until their injected key is refreshed (a redeploy/restart
+             gives them the new one). Do it in a maintenance window, in this
+             order: note the new anon + service_role keys -> update the front-end
+             env -> redeploy the front end -> `supabase functions deploy` (to
+             refresh injected env) -> verify D4 (401 on ingest-feeds, 200 on
+             sitemap) -> verify a manual ingest call returns 200.
+    BLOCKED (needs the dashboard).
+
+--------------------------------------------------------------------------------
+SECTION G — GRADUAL ENABLEMENT
+--------------------------------------------------------------------------------
+Only the jobs in this section may ever be switched on by hand, and only in
+this order. The eight gate jobs are the only ones this checklist enables; the
+SQL below is the exact text the test suite reads from this file and executes
+against PostgreSQL, so what you run here is what is verified.
+
+G1. Enable writing and publishing, after SECTION E has passed.
+    DO     select cron.alter_job(jobid, active => true) from cron.job
+            where jobname in ('write-desk','publish-scheduler');
+    EXPECT active count goes from 6 to 8; the 6 remaining gate jobs stay
+           inactive. After that:
+             select jobname, active from cron.job order by jobname;
+             -> write-desk true, publish-scheduler true, the other 6 gate jobs
+                false, the 6 safe jobs true
+           Within an hour: pipeline_runs rows appear every 10/30 minutes, and no
+           more than 18 posts land per UTC day. Verify:
+             select count(*) from public.posts
+              where status='published'
+                and published_at >= date_trunc('day', now() at time zone 'utc');
+             select function, count(*) filter (where ok) ok_runs, max(started_at),
+                    max(error) filter (where not ok)
+               from public.pipeline_runs
+              where started_at > now() - interval '2 hours' group by function;
+    IF IT FAILS  Close the gate again with the statement in B2. Investigate with
+           cron.job_run_details + the function logs; fix forward, re-run E2-E5
+           before re-enabling.
+
+G2. After 24 hours of G1 behaving, enable the editions and the reader alerts.
+    DO     select cron.alter_job(jobid, active => true) from cron.job
+            where jobname in ('auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                              'breaking-news-monitor','notifications-dispatcher');
+    WHY    auto-publish runs the whole pipeline unattended (ingest -> write ->
+           publish) and breaking-news-monitor triggers it on a new headline;
+           notifications-dispatcher is the only job that reaches readers
+           directly, so a bad article must not be able to ping them before the
+           softer path has proven itself.
+    EXPECT active count goes from 8 to 13; `newsroom-maintenance` (the last gate
+           job) is still inactive. After the first edition: `wrote` and
+           `published` are both non-zero, and the day stays within the caps.
+
+G3. Maintenance — a SEPARATE decision, and the only step that needs the B3
+    archive review first.
+    DO     complete B3 (the archive pre-check) and decide what those rows mean.
+           Only then:
+             select cron.alter_job(jobid, active => true) from cron.job
+             where jobname in ('newsroom-maintenance');
+    WHY    Keeping this as its own step means a project can publish perfectly
+           while never archiving anything: an operator who has not reviewed the
+           730-day/50-view rows does not have to authorise a job that changes
+           pages readers can already see. Nothing else in the loop depends on
+           maintenance running.
+    EXPECT active count goes from 13 to 14 (the full set is live). The hourly
+           run writes a content_health_checks row and reports findings:
+             select kind, count(*), max(created_at) from public.content_health_checks
+              group by kind order by 2 desc;
+           If it archives something unexpected, the change is reversible:
+             update public.posts set status = 'published', archived_at = null
+              where slug = '<slug>';
+    DECLINING  Leave `newsroom-maintenance` inactive. Ingestion, writing,
+           publishing, trends, the monitor and both prunes are unaffected.
+
+G4. Set up the outside alarm an operator actually gets: an uptime monitor
+    POSTing to phase6-monitor every 30 minutes with the secret, alerting when
+    the response is not 200 or .ok is false.
+
+--------------------------------------------------------------------------------
+SECTION H — EMERGENCY STOP AND ROLLBACK REFERENCE
+--------------------------------------------------------------------------------
+  -- 1. Stop everything that can change public content or reader state.
+  --    This is the same statement as B2 — one canonical gate, no variants.
+  select cron.alter_job(jobid, active => false)
+    from cron.job
+   where jobname in ('write-desk','publish-scheduler',
+                     'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor','notifications-dispatcher',
+                     'newsroom-maintenance');
+  -- 2. Stop everything, ingestion and monitoring included — reversible,
+  --    deletes nothing; use when you want total silence, not just safety.
+  select cron.alter_job(jobid, active => false) from cron.job;
+  -- 3. Back to the post-migration state (6 safe jobs only).
+  select cron.alter_job(jobid, active => true) from cron.job;
+  select cron.alter_job(jobid, active => false)
+    from cron.job
+   where jobname in ('write-desk','publish-scheduler','auto-publish-morning',
+                     'auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor','notifications-dispatcher',
+                     'newsroom-maintenance');
+  -- stop one feed
+  update public.content_sources set active = false where name = '<feed>';
+  -- un-publish one article without deleting it (see E4 for the exact form)
+  -- take one article out of the index entirely (kept in the table)
+  update public.posts set status = 'archived', archived_at = now() where slug = '<slug>';
+
+  Nothing in Phase 6 deletes posts. The only automatic deletions are retention
+  prunes, all of which exclude published content:
+    candidates expired > 7d, pipeline_runs > 30d, content_health_checks > 30d,
+    resolved alerts > 60d, topic_trends expired > 7d, post_view_events > 90d.
+
+--------------------------------------------------------------------------------
+SECTION I — DELIBERATE GAPS (do not read these as PASS)
+--------------------------------------------------------------------------------
+1. CI does not run the Deno function check (docs/ci-workflow.pending.yml). Two
+   consequences: the file still has to be committed by a token with the
+   `workflows` scope, and until that step is added CI cannot catch a
+   browser-global bug in an edge function (the class of defect that silently
+   disabled breaking-news-monitor). Verified command to add:
+     npm i -D deno && npm run check:functions
+2. pg_cron actually firing is not verified here and cannot be: it needs the live
+   platform. The migration's job definitions are verified; the clock is not.
+3. Feed reachability from Supabase's network, real model quality, and Google's
+   indexing of the refreshed sitemaps are all live-only.
+4. `phase6-monitor` returns 207 (not 200) whenever it lists problems, by design;
+   a monitoring tool must treat 207-with-ok:false as an alert, not as "HTTP ok".
+5. The repo has no automated test for the maintenance archive threshold against
+   real data — B3 is a manual gate for that reason.

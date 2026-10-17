@@ -4,20 +4,20 @@ import { SITE } from "@/lib/site";
 import logo from "@/assets/logo.png";
 
 const COLORS = [
-  { name: "Deep Navy", token: "--headline", hex: "#0B1B3B", use: "Headlines, primary brand mark" },
-  { name: "Sparkle Blue", token: "--primary", hex: "#1E5BFF", use: "Links, CTAs, accent" },
-  { name: "Signal Red", token: "--cat-politics", hex: "#DC2626", use: "Breaking & National badge" },
-  { name: "Spark Gold", token: "--accent", hex: "#F5B400", use: "Sparkle highlights" },
-  { name: "Paper", token: "--background", hex: "#FFFFFF", use: "Default surface" },
-  { name: "Ink", token: "--foreground", hex: "#111827", use: "Body copy" },
-  { name: "Byline", token: "--byline", hex: "#6B7280", use: "Meta, captions, secondary" },
-  { name: "Rule", token: "--rule", hex: "#E5E7EB", use: "Dividers, hairlines" },
+  { name: "Headline Ink", token: "--headline", use: "Headlines and brand wordmark" },
+  { name: "Spark Orange", token: "--primary", use: "Links, CTAs and accents" },
+  { name: "Signal Red", token: "--cat-breaking", use: "Breaking-news section labels" },
+  { name: "Editorial Navy", token: "--accent", use: "Supporting accents" },
+  { name: "Paper", token: "--background", use: "Default surface" },
+  { name: "Body Ink", token: "--foreground", use: "Body copy" },
+  { name: "Byline", token: "--byline", use: "Metadata and captions" },
+  { name: "Rule", token: "--rule", use: "Section dividers" },
 ];
 
 const LOGO_SIZES = [
-  { context: "Mobile header", size: "40 px height", note: "h-10, auto width" },
-  { context: "Tablet header", size: "48 px height", note: "sm:h-12" },
-  { context: "Desktop header", size: "56 px height", note: "md:h-14" },
+  { context: "Mobile header wordmark", size: "20 px type", note: "Text wordmark, not a stretched logo image" },
+  { context: "Tablet header wordmark", size: "24 px type", note: "sm:text-2xl" },
+  { context: "Desktop header wordmark", size: "28 px type", note: "lg:text-[28px]" },
   { context: "Footer", size: "32–40 px height", note: "Optional, small variant" },
   { context: "Favicon", size: "32 × 32 px", note: "/favicon.png" },
   { context: "Open Graph", size: "1200 × 630 px", note: "Social share card" },
@@ -25,7 +25,7 @@ const LOGO_SIZES = [
 ];
 
 const TYPOGRAPHY = [
-  { role: "Display / Headlines", family: "Playfair Display (serif)", weight: "700–900", note: "Article H1, hero kickers" },
+  { role: "Display / Headlines", family: "Fraunces (serif)", weight: "700–900", note: "Article H1, hero kickers" },
   { role: "UI / Body", family: "Inter (sans-serif)", weight: "400 / 600", note: "Paragraphs, navigation, UI" },
   { role: "Kicker / Eyebrow", family: "Inter", weight: "600 uppercase, tracking-wider", note: "Section labels, dates" },
 ];
@@ -84,14 +84,14 @@ export default function Brand() {
         {/* COLORS */}
         <section className="mt-14">
           <div className="rule-top mb-6"><h2 className="font-serif text-2xl font-bold">Color Palette</h2></div>
+          <p className="text-sm text-byline mb-6">Swatches use the active site theme tokens and adjust for light or dark mode.</p>
           <div className="grid gap-4 sm:grid-cols-2">
             {COLORS.map(c => (
               <div key={c.name} className="border border-border flex overflow-hidden">
-                <div className="w-20 shrink-0" style={{ backgroundColor: c.hex }} aria-hidden="true" />
-                <div className="p-4 flex-1">
+                <div className="w-20 shrink-0" style={{ backgroundColor: `hsl(var(${c.token}))` }} aria-hidden="true" />
+                <div className="p-4 flex-1 min-w-0">
                   <div className="flex items-baseline justify-between gap-2">
                     <h3 className="font-semibold text-headline">{c.name}</h3>
-                    <code className="text-xs text-byline">{c.hex}</code>
                   </div>
                   <p className="text-xs text-byline mt-1"><code>{c.token}</code></p>
                   <p className="text-sm text-foreground/80 mt-2">{c.use}</p>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Bell, X, Zap, TrendingUp } from "lucide-react";
 import { Link } from "react-router-dom";
+import { readStorage, writeStorage } from "@/lib/storage";
 
 type AlertRow = {
   id: string;
@@ -19,7 +20,8 @@ const SEEN_KEY = "ns_alert_seen_v1";
 
 function getSeen(): Set<string> {
   try {
-    return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || "[]"));
+    const stored: unknown = JSON.parse(readStorage(SEEN_KEY) || "[]");
+    return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : []);
   } catch {
     return new Set();
   }
@@ -29,7 +31,7 @@ function markSeen(id: string) {
   s.add(id);
   // Keep last 200
   const arr = Array.from(s).slice(-200);
-  localStorage.setItem(SEEN_KEY, JSON.stringify(arr));
+  writeStorage(SEEN_KEY, JSON.stringify(arr));
 }
 
 function fireBrowserNotification(a: AlertRow) {
@@ -40,8 +42,8 @@ function fireBrowserNotification(a: AlertRow) {
       a.kind === "breaking" ? `🚨 Breaking: ${a.title}` : `🔥 Trending: ${a.title}`,
       {
         body: a.excerpt ?? "",
-        icon: a.image_url ?? "/logo.svg",
-        badge: "/logo.svg",
+        icon: a.image_url ?? "/icon-192.png",
+        badge: "/icon-192.png",
         tag: `news-${a.id}`,
       },
     );
@@ -64,6 +66,7 @@ export function BreakingNewsAlerts() {
 
     // Load most recent active alert (so users arriving on the site see it once)
     (async () => {
+      try {
       const { data } = await supabase
         .from("notifications")
         .select("*")
@@ -74,6 +77,9 @@ export function BreakingNewsAlerts() {
       const a = data?.[0] as AlertRow | undefined;
       if (a && !seenRef.current.has(a.id)) {
         setActive(a);
+      }
+      } catch (error) {
+        if (mounted) console.warn("[alerts] Notifications unavailable:", error);
       }
     })();
 

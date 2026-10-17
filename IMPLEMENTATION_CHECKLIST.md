@@ -1,5 +1,10 @@
 # ✅ NewsSparkle Author Avatar Implementation - Complete Checklist
 
+> ⚠️ **Historical document.** Written before the code was audited: some claims
+> below (notably "ZERO ERRORS") did not match the code, and the issues were
+> fixed in the remediation phase. See [`docs/PHASES.md`](docs/PHASES.md) for the
+> accurate build history and [`REPO_ANALYSIS.md`](REPO_ANALYSIS.md) for findings.
+
 ## Phase 1: Image Processing ✅
 - [x] Loaded group image (3767×3767px with 6 people in 3×2 grid)
 - [x] Created intelligent Python script for automated cropping

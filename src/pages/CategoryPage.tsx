@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, Navigate, Link, useSearchParams } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Post } from "@/lib/types";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
@@ -10,42 +11,70 @@ import { CATEGORIES, SITE } from "@/lib/site";
 import { CATEGORY_FAQS } from "@/lib/categoryFaqs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { TrendingUp, ArrowRight, ChevronLeft, ChevronRight } from "lucide-react";
+import { LoadError } from "@/components/LoadError";
 
 const PAGE_SIZE = 12;
 
 export default function CategoryPage() {
   const { slug } = useParams<{ slug: string }>();
   const [searchParams] = useSearchParams();
-  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
+  const requestedPage = Number(searchParams.get("page") || "1");
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 && requestedPage <= Math.floor(2_147_483_647 / PAGE_SIZE) ? requestedPage : 1;
   const cat = CATEGORIES.find(c => c.slug === slug);
   const [posts, setPosts] = useState<Post[]>([]);
   const [total, setTotal] = useState(0);
   const [trending, setTrending] = useState<Post[]>([]);
   const [otherPool, setOtherPool] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [loadedFor, setLoadedFor] = useState("");
 
   useEffect(() => {
-    if (!slug) return;
+    if (!cat) return;
+    let active = true;
+    const controller = new AbortController();
     setLoading(true);
+    setLoadedFor("");
+    setError(false);
+    setPosts([]);
+    setTrending([]);
+    setOtherPool([]);
     const from = (page - 1) * PAGE_SIZE;
-    const to = from + PAGE_SIZE - 1;
-    supabase.from("posts").select("*", { count: "exact" }).eq("category_slug", slug).eq("status", "published")
-      .order("published_at", { ascending: false }).range(from, to)
-      .then(({ data, count }) => {
-        setPosts((data as Post[]) || []);
-        setTotal(count || 0);
-        setLoading(false);
-        if (page > 1) window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
-      });
-
-    supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
-      .order("views", { ascending: false }).limit(6)
-      .then(({ data }) => setTrending((data as Post[]) || []));
-
-    supabase.from("posts").select("*").eq("status", "published").neq("category_slug", slug)
-      .order("published_at", { ascending: false }).limit(120)
-      .then(({ data }) => setOtherPool((data as Post[]) || []));
-  }, [slug, page]);
+    (async () => {
+      try {
+        const result = await supabase.from("posts").select(POST_CARD_COLUMNS, { count: "exact" })
+          .eq("category_slug", slug).eq("status", "published").order("published_at", { ascending: false })
+          .range(from, from + PAGE_SIZE - 1).abortSignal(controller.signal);
+        if (result.error) throw result.error;
+        if (active) {
+          setPosts(normalizePosts(result.data));
+          setTotal(result.count || 0);
+          setLoadedFor(`${slug}:${page}`);
+          if (page > 1) window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+        }
+      } catch (cause) {
+        if (active) { console.warn("[category] Stories unavailable:", cause); setError(true); }
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    (async () => {
+      try {
+        const [popular, pool] = await Promise.all([
+          supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published").neq("category_slug", slug)
+            .order("views", { ascending: false }).limit(6).abortSignal(controller.signal),
+          supabase.from("posts").select(POST_CARD_COLUMNS).eq("status", "published").neq("category_slug", slug)
+            .order("published_at", { ascending: false }).limit(120).abortSignal(controller.signal),
+        ]);
+        if (active) {
+          if (!popular.error) setTrending(normalizePosts(popular.data));
+          if (!pool.error) setOtherPool(normalizePosts(pool.data));
+        }
+      } catch { /* Optional recommendations must not mask the main archive's state. */ }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [cat, slug, page, attempt]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -123,10 +152,13 @@ export default function CategoryPage() {
       .map(x => x.post);
 
     return scored;
-  }, [posts, otherPool, slug]);
+  }, [posts, otherPool]);
 
 
   if (!cat) return <Navigate to="/404" replace />;
+  if (loadedFor === `${slug}:${page}` && !loading && !error && page > totalPages) {
+    return <Navigate to={`/category/${cat.slug}${totalPages > 1 ? `?page=${totalPages}` : ""}`} replace />;
+  }
 
   const url = `${SITE.url}/category/${cat.slug}`;
   const description = `The latest ${cat.name.toLowerCase()} news, in-depth analysis and breaking stories from the ${SITE.name} editorial desk.`;
@@ -215,7 +247,7 @@ export default function CategoryPage() {
       </section>
 
       <div className="container-wide py-12">
-        {loading ? (
+        {error ? <LoadError onRetry={() => setAttempt(value => value + 1)} /> : loading ? (
           <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
             {[...Array(6)].map((_, i) => <div key={i} className="h-80 bg-muted" />)}
           </div>
@@ -230,7 +262,7 @@ export default function CategoryPage() {
               {(page === 1 ? posts.slice(1) : posts).map(p => <PostCard key={p.id} post={p} />)}
             </div>
             {totalPages > 1 && (
-              <nav aria-label="Pagination" className="mt-12 flex items-center justify-center gap-2">
+              <nav aria-label="Pagination" className="mt-12 flex flex-wrap items-center justify-center gap-2">
                 {page > 1 && (
                   <Link to={`/category/${cat.slug}${page - 1 > 1 ? `?page=${page - 1}` : ""}`} className="flex items-center gap-1 px-4 py-2 border border-border hover:border-primary hover:text-primary text-sm" rel="prev">
                     <ChevronLeft className="size-4" /> Prev
@@ -293,7 +325,7 @@ export default function CategoryPage() {
                 return (
                   <li key={p.id} className="border-b border-border pb-4 sm:border-0 sm:pb-0">
                     <Link to={`/post/${p.slug}`} className="group flex gap-4 items-start">
-                      <span className="font-serif text-3xl font-black text-byline/40 leading-none w-10 shrink-0">
+                      <span className="font-serif text-3xl font-black text-byline leading-none w-10 shrink-0">
                         {String(i + 1).padStart(2, "0")}
                       </span>
                       <div className="flex-1">

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { OptimizedImage } from "@/components/OptimizedImage";
 import { formatDate } from "@/lib/site";
 import { TrendingUp } from "lucide-react";
@@ -13,12 +14,12 @@ export function TrendingSidebar() {
     const fetchTrending = async () => {
       const { data } = await supabase
         .from("posts")
-        .select("*")
+        .select(POST_CARD_COLUMNS)
         .eq("status", "published")
         .order("views", { ascending: false })
         .limit(5);
 
-      if (data) setTrending(data);
+      if (data) setTrending(normalizePosts(data));
     };
 
     fetchTrending();
@@ -63,7 +64,7 @@ export function TrendingSidebar() {
       </div>
 
       <Link
-        to="/trending"
+        to="/search?sort=popular"
         className="inline-block mt-4 text-xs text-primary hover:text-primary/80 font-medium uppercase tracking-wider"
       >
         View All Trending →

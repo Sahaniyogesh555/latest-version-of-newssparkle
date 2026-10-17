@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- all posts, categories, authors and tags -->
   <sitemap>
-    <loc>https://newssparkle.lovable.app/functions/v1/sitemap</loc>
+    <loc>https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/sitemap</loc>
   </sitemap>
+  <!-- Google News feed — last 48 hours -->
   <sitemap>
-    <loc>https://newssparkle.lovable.app/functions/v1/news-sitemap</loc>
+    <loc>https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/news-sitemap</loc>
   </sitemap>
 </sitemapindex>

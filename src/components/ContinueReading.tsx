@@ -1,30 +1,32 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePost } from "@/lib/posts";
 import { Post } from "@/lib/types";
 import { OptimizedImage } from "@/components/OptimizedImage";
 import { formatDate } from "@/lib/site";
 import { Clock, BookOpen } from "lucide-react";
+import { readStorage } from "@/lib/storage";
 
 export function ContinueReading() {
   const [continueReading, setContinueReading] = useState<Post | null>(null);
 
   useEffect(() => {
-    // Get the last viewed post from localStorage or a similar mechanism
-    const lastViewed = localStorage.getItem('lastViewedPost');
+    let active = true;
+    const controller = new AbortController();
+    const lastViewed = readStorage("lastViewedPost");
     if (lastViewed) {
-      const fetchPost = async () => {
-        const { data } = await supabase
-          .from("posts")
-          .select("*")
-          .eq("slug", lastViewed)
-          .eq("status", "published")
-          .single();
-
-        if (data) setContinueReading(data as Post);
-      };
-      fetchPost();
+      (async () => {
+        try {
+          const { data, error } = await supabase.from("posts").select(POST_CARD_COLUMNS)
+            .eq("slug", lastViewed).eq("status", "published").abortSignal(controller.signal).maybeSingle();
+          if (active && !error && data) setContinueReading(normalizePost(data));
+        } catch {
+          // Optional convenience rail: a missing/unavailable story must not break the feed.
+        }
+      })();
     }
+    return () => { active = false; controller.abort(); };
   }, []);
 
   if (!continueReading) return null;
@@ -47,7 +49,8 @@ export function ContinueReading() {
               alt={continueReading.title}
               width={100}
               height={60}
-              className="w-25 h-15 object-cover rounded-md flex-shrink-0"
+              pictureClassName="w-[100px] h-[60px] shrink-0"
+              className="w-full h-full object-cover rounded-md"
               loading="lazy"
             />
           )}
@@ -55,7 +58,7 @@ export function ContinueReading() {
             <h4 className="font-semibold text-headline group-hover:text-primary transition-colors line-clamp-2 mb-2">
               {continueReading.title}
             </h4>
-            <div className="flex items-center gap-3 text-sm text-byline">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-byline">
               <time dateTime={continueReading.published_at}>
                 {formatDate(continueReading.published_at)}
               </time>

@@ -45,13 +45,13 @@ Published stories include:
 
 ## Contact
 - **Website**: https://newssparkle.lovable.app
-- **Editorial**: editorial@newssparkle.lovable.app
-- **Technical**: tech@newssparkle.lovable.app
+- **Editorial**: contact.newssparkle@gmail.com
+- **Contact page**: /contact
 
 ## Resources
 - **Main Sitemap**: https://newssparkle.lovable.app/sitemap.xml
-- **News Sitemap**: https://newssparkle.lovable.app/functions/v1/news-sitemap
-- **RSS**: https://newssparkle.lovable.app/functions/v1/rss
+- **News Sitemap**: https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/news-sitemap
+- **RSS**: https://ruusbjlabbojpbawbphc.supabase.co/functions/v1/rss
 
 ## Ethical Usage
 - Respect user privacy

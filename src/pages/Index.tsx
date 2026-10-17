@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
@@ -11,6 +12,7 @@ import { TrendingSection } from "@/components/TrendingSection";
 import { CategoryBlock } from "@/components/CategoryBlock";
 import { EditorsPicksSection } from "@/components/EditorsPicksSection";
 import { ContinueReading } from "@/components/ContinueReading";
+import { NewsUpdates } from "@/components/NewsUpdates";
 import { Link } from "react-router-dom";
 import { Mail, Heart } from "lucide-react";
 
@@ -19,71 +21,113 @@ const PAGE_SIZE = 15;
 export default function Index() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const mountedRef = useRef(true);
+  const moreControllerRef = useRef<AbortController>();
   const [hasMore, setHasMore] = useState(true);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [categoryPosts, setCategoryPosts] = useState<Record<string, Post[]>>({});
 
   useEffect(() => {
+    let active = true;
+    mountedRef.current = true;
+    const controller = new AbortController();
     const initialize = async () => {
-      // Fetch main feed
-      const { data: mainPosts } = await supabase
-        .from("posts")
-        .select("*")
-        .eq("status", "published")
-        .order("published_at", { ascending: false })
-        .range(0, PAGE_SIZE);
-
-      const postList = (mainPosts as Post[]) || [];
-      setPosts(postList);
-      setHasMore(postList.length === PAGE_SIZE + 1);
-      setLoading(false);
-
-      // Fetch posts for each category (for category blocks)
-      const categoryData: Record<string, Post[]> = {};
-      for (const cat of CATEGORIES) {
-        const { data } = await supabase
+      try {
+        // Main feed. PAGE_SIZE + 1 rows so we can tell whether more exist:
+        // the hero row is consumed separately, hence the extra offset.
+        const { data: mainPosts, error: mainError } = await supabase
           .from("posts")
-          .select("*")
-          .eq("category_slug", cat.slug)
+          .select(POST_CARD_COLUMNS)
           .eq("status", "published")
           .order("published_at", { ascending: false })
-          .limit(4);
-        if (data) {
-          categoryData[cat.slug] = (data as Post[]) || [];
+          .range(0, PAGE_SIZE).abortSignal(controller.signal);
+
+        if (!active) return;
+        if (mainError) throw mainError;
+
+        const postList = normalizePosts(mainPosts);
+        setPosts(postList);
+        setHasMore(postList.length === PAGE_SIZE + 1);
+        setError(null);
+      } catch (e) {
+        if (active) {
+          console.warn("[homepage] Feed unavailable:", e);
+          setError("Unable to load the latest stories.");
         }
+      } finally {
+        if (active) setLoading(false);
       }
-      setCategoryPosts(categoryData);
+      if (!active) return;
+
+      // Category blocks. These render below the fold, so they run after the
+      // main feed resolves rather than blocking it (was a sequential loop).
+      const categoryData: Record<string, Post[]> = {};
+      await Promise.all(
+        CATEGORIES.map(async (cat) => {
+          try {
+          const { data } = await supabase
+            .from("posts")
+            .select(POST_CARD_COLUMNS)
+            .eq("category_slug", cat.slug)
+            .eq("status", "published")
+            .order("published_at", { ascending: false })
+            .limit(4).abortSignal(controller.signal);
+          if (data) categoryData[cat.slug] = normalizePosts(data);
+          } catch { /* Optional section previews must not crash the homepage. */ }
+        }),
+      );
+      if (active) setCategoryPosts(categoryData);
     };
 
-    initialize();
+    void initialize();
+    return () => {
+      active = false;
+      mountedRef.current = false;
+      controller.abort();
+      moreControllerRef.current?.abort();
+    };
   }, []);
 
   const loadMore = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
+    if (loadingMoreRef.current || !hasMore) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
-    const from = posts.length;
-    const to = from + PAGE_SIZE - 1;
-    const { data } = await supabase
-      .from("posts")
-      .select("*")
-      .eq("status", "published")
-      .order("published_at", { ascending: false })
-      .range(from, to);
-    const next = (data as Post[]) || [];
-    setPosts((prev) => [...prev, ...next]);
-    setHasMore(next.length === PAGE_SIZE);
-    setLoadingMore(false);
-  }, [posts.length, loadingMore, hasMore]);
+    setLoadMoreError(false);
+    const controller = new AbortController();
+    moreControllerRef.current = controller;
+    try {
+      const from = posts.length;
+      const { data, error: moreError } = await supabase.from("posts").select(POST_CARD_COLUMNS)
+        .eq("status", "published").order("published_at", { ascending: false })
+        .range(from, from + PAGE_SIZE - 1).abortSignal(controller.signal);
+      if (moreError) throw moreError;
+      if (!mountedRef.current) return;
+      const next = normalizePosts(data);
+      setPosts(previous => [...previous, ...next.filter(post => !previous.some(existing => existing.id === post.id))]);
+      setHasMore(next.length === PAGE_SIZE);
+    } catch (cause) {
+      if (mountedRef.current) {
+        console.warn("[homepage] More stories unavailable:", cause);
+        setLoadMoreError(true);
+      }
+    } finally {
+      loadingMoreRef.current = false;
+      if (mountedRef.current) setLoadingMore(false);
+    }
+  }, [posts.length, hasMore]);
 
   useEffect(() => {
-    if (!sentinelRef.current || !hasMore || loading) return;
+    if (!sentinelRef.current || !hasMore || loading || loadMoreError) return;
     const obs = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) loadMore();
     }, { rootMargin: "800px" });
     obs.observe(sentinelRef.current);
     return () => obs.disconnect();
-  }, [loadMore, hasMore, loading]);
+  }, [loadMore, hasMore, loading, loadMoreError]);
 
   const hero = posts[0];
   const secondary = posts.slice(1, 4);
@@ -122,7 +166,7 @@ export default function Index() {
     },
     potentialAction: {
       "@type": "SearchAction",
-      target: { "@type": "EntryPoint", urlTemplate: `${SITE.url}/?s={search_term_string}` },
+      target: { "@type": "EntryPoint", urlTemplate: `${SITE.url}/search?q={search_term_string}` },
       "query-input": "required name=search_term_string",
     },
   };
@@ -174,7 +218,7 @@ export default function Index() {
               </div>
             </div>
 
-            <div className="space-y-4 min-w-[280px] lg:max-w-xs">
+            <div className="space-y-4 min-w-0 w-full lg:max-w-xs lg:shrink-0">
               <div className="rounded-3xl border border-border bg-secondary/10 p-6">
                 <div className="flex items-center justify-between gap-4 mb-4">
                   <span className="kicker text-primary uppercase">Top story</span>
@@ -198,7 +242,7 @@ export default function Index() {
                     </p>
                   </Link>
                 ) : (
-                  <div className="h-56 rounded-3xl bg-muted animate-pulse" />
+                  loading ? <div className="h-56 rounded-3xl bg-muted animate-pulse" aria-label="Loading top story" /> : <p className="text-sm text-byline">No featured story is available right now.</p>
                 )}
               </div>
               <div className="rounded-3xl border border-border bg-background/95 p-6">
@@ -222,6 +266,27 @@ export default function Index() {
           </div>
         </div>
       </section>
+
+      {/* Feed failure — say so instead of rendering an empty newsroom */}
+      {error && !loading && (
+        <section className="container-wide pt-6" role="alert">
+          <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center gap-4 justify-between">
+            <div>
+              <p className="kicker text-destructive">Feed unavailable</p>
+              <p className="mt-1 text-sm text-foreground/80">
+                We could not reach the newsroom database ({error}). Stories may be incomplete.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="inline-flex items-center justify-center rounded-full border border-border bg-background px-4 py-2 text-sm font-semibold hover:border-primary hover:text-primary transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Featured hero grid */}
       {!loading && hero && (
@@ -270,18 +335,19 @@ export default function Index() {
           ) : (
             <>
               <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3">
-                {latest.slice(0, PAGE_SIZE).map((p) => (
+                {latest.map((p) => (
                   <PostCard key={p.id} post={p} />
                 ))}
               </div>
               <div ref={sentinelRef} aria-hidden className="h-10 mt-10" />
               <div className="mt-10 flex flex-col items-center gap-4">
+                {loadMoreError && <p role="alert" className="text-sm text-destructive text-center">We could not load more stories. Your current stories are still available. Please retry.</p>}
                 {hasMore && !loadingMore ? (
                   <button
                     onClick={loadMore}
                     className="inline-flex items-center justify-center rounded-full border border-primary bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
                   >
-                    Load more stories
+                    {loadMoreError ? "Retry loading stories" : "Load more stories"}
                   </button>
                 ) : null}
                 {loadingMore && (
@@ -334,34 +400,9 @@ export default function Index() {
             </div>
             <div className="kicker text-primary mb-3">STAY INFORMED</div>
             <h2 className="headline-lg mb-4">
-              Get the news that matters, every morning.
+              Follow the stories that matter.
             </h2>
-            <p className="text-lg text-foreground/70 leading-relaxed mb-8">
-              The stories you need to know, fact-checked, and edited for clarity. One email.
-              Every day. Free.
-            </p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-              }}
-              className="flex flex-col sm:flex-row gap-3 max-w-md mx-auto"
-            >
-              <input
-                type="email"
-                required
-                placeholder="you@example.com"
-                className="flex-1 px-4 py-3 bg-background border border-border rounded-lg focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 text-sm transition-all"
-              />
-              <button
-                type="submit"
-                className="btn-primary px-6 py-3 whitespace-nowrap"
-              >
-                Subscribe
-              </button>
-            </form>
-            <p className="mt-4 text-xs text-byline uppercase tracking-wider">
-              Unsubscribe anytime. Privacy guaranteed.
-            </p>
+            <NewsUpdates />
           </div>
         </div>
       </section>

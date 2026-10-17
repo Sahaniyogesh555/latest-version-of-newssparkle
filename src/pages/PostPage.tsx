@@ -4,6 +4,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { supabase } from "@/integrations/supabase/client";
 import { Post } from "@/lib/types";
+import { POST_CARD_COLUMNS, POST_FULL_COLUMNS, normalizePost, normalizePosts } from "@/lib/posts";
+import { getVisitorId } from "@/lib/visitor";
 import { Layout } from "@/components/Layout";
 import { PostCard } from "@/components/PostCard";
 import { SEO } from "@/components/SEO";
@@ -12,6 +14,7 @@ import { ShareBar } from "@/components/ShareBar";
 import { StickyShareBar } from "@/components/StickyShareBar";
 import { BookmarkButton } from "@/components/BookmarkButton";
 import { OptimizedImage } from "@/components/OptimizedImage";
+import { AuthorImage } from "@/components/AuthorImage";
 import { TableOfContents } from "@/components/TableOfContents";
 import { RelatedArticles } from "@/components/RelatedArticles";
 import { TrendingSidebar } from "@/components/TrendingSidebar";
@@ -28,40 +31,76 @@ export default function PostPage() {
   const [related, setRelated] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!slug) return;
+    let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setNotFound(false);
+    setError(null);
+    setPost(null);
+    setRelated([]);
+    window.scrollTo(0, 0);
+
     (async () => {
-      const { data } = await supabase
-        .from("posts")
-        .select("*")
-        .eq("slug", slug)
-        .eq("status", "published")
-        .maybeSingle();
-      if (!data) {
-        setNotFound(true);
-        setLoading(false);
+      let current: Post;
+      try {
+        const result = await supabase.from("posts").select(POST_FULL_COLUMNS)
+          .eq("slug", slug).eq("status", "published").abortSignal(controller.signal).maybeSingle();
+        if (cancelled) return;
+        if (result.error) throw result.error;
+        if (!result.data) { setNotFound(true); return; }
+        current = normalizePost(result.data);
+        setPost(current);
+        try { localStorage.setItem("lastViewedPost", current.slug); } catch { /* Optional reading history. */ }
+      } catch (cause) {
+        if (!cancelled) {
+          console.warn("[article] Story unavailable:", cause);
+          setError("The story is temporarily unavailable. Please try again in a moment.");
+        }
         return;
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      setPost(data as Post);
-      setLoading(false);
-      supabase.rpc("increment_post_views", { post_slug: slug });
-      const { data: rel } = await supabase
-        .from("posts")
-        .select("*")
-        .eq("category_slug", (data as Post).category_slug)
-        .eq("status", "published")
-        .neq("id", (data as Post).id)
-        .order("published_at", { ascending: false })
-        .limit(6);
-      setRelated((rel as Post[]) || []);
-      window.scrollTo(0, 0);
+
+      // View counting and recommendations must never take the loaded article down.
+      try {
+        void Promise.resolve(supabase.rpc("increment_post_views", { post_slug: slug, visitor_id: getVisitorId() }))
+          .then(({ error: rpcError }) => { if (rpcError) console.warn("[views] increment failed:", rpcError.message); })
+          .catch(cause => console.warn("[views] increment failed:", cause));
+      } catch (cause) { console.warn("[views] increment failed:", cause); }
+      try {
+        const { data: rel, error: relatedError } = await supabase.from("posts").select(POST_CARD_COLUMNS)
+          .eq("category_slug", current.category_slug).eq("status", "published").neq("id", current.id)
+          .order("published_at", { ascending: false }).limit(6).abortSignal(controller.signal);
+        if (!cancelled && !relatedError) setRelated(normalizePosts(rel));
+      } catch { /* Recommendations are optional. */ }
     })();
-  }, [slug]);
+    return () => { cancelled = true; controller.abort(); };
+  }, [slug, attempt]);
 
   if (notFound) return <Navigate to="/404" replace />;
+
+  if (error)
+    return (
+      <Layout>
+        <SEO title="Story unavailable" description="This story is temporarily unavailable. Please try again shortly." path={`/post/${slug}`} robots="noindex, follow" />
+        <div className="container-prose py-24 text-center" role="alert">
+          <div className="kicker text-primary mb-3">Temporary problem</div>
+          <h1 className="headline-lg mb-4">We could not load this story</h1>
+          <p className="text-foreground/70 mb-8">
+            {error}
+          </p>
+          <div className="flex flex-wrap justify-center gap-3">
+            <button type="button" onClick={() => setAttempt(value => value + 1)} className="btn-primary">Retry</button>
+            <Link to="/" className="btn border border-border">Back to homepage</Link>
+          </div>
+        </div>
+      </Layout>
+    );
   if (loading || !post)
     return (
       <Layout>
@@ -130,13 +169,6 @@ export default function PostPage() {
       "@type": "Thing",
       name: keyword
     })),
-    aggregateRating: post.views ? {
-      "@type": "AggregateRating",
-      ratingValue: Math.min(5, Math.max(1, Math.round((post.views / 1000) * 5))), // Scale views to 1-5 rating
-      reviewCount: post.views,
-      bestRating: 5,
-      worstRating: 1
-    } : undefined,
   };
 
   const breadcrumbLd = {
@@ -191,7 +223,7 @@ export default function PostPage() {
         <header className="bg-gradient-to-b from-secondary/30 via-secondary/10 to-transparent border-b border-border/50">
           <div className="container-prose py-12 sm:py-16">
             {/* Breadcrumb */}
-            <nav className="flex items-center gap-2 text-xs text-byline uppercase tracking-wider mb-6">
+            <nav aria-label="Breadcrumb" className="flex flex-wrap items-center gap-2 text-xs text-byline uppercase tracking-wider mb-6">
               <Link to="/" className="hover:text-primary transition-colors">
                 Home
               </Link>
@@ -275,7 +307,7 @@ export default function PostPage() {
                 </div>
               </Link>
 
-              <div className="flex items-center gap-4 sm:gap-6 text-xs text-byline uppercase tracking-wider">
+              <div className="flex flex-wrap items-center gap-4 sm:gap-6 text-xs text-byline uppercase tracking-wider">
                 <span className="flex items-center gap-1.5">
                   <time dateTime={post.published_at}>
                     {formatDate(post.published_at)}
@@ -344,7 +376,8 @@ export default function PostPage() {
         <div className="container-wide py-16 sm:py-20">
           <div className="grid gap-8 lg:gap-12 lg:grid-cols-4">
             {/* Main content */}
-            <div className="lg:col-span-3">
+            <div className="min-w-0 lg:col-span-3">
+              <div className="mb-8 lg:hidden"><TableOfContents /></div>
               <div className="ad-slot mb-12" data-ad-slot="article-top">
                 Advertisement
               </div>
@@ -354,10 +387,8 @@ export default function PostPage() {
                   remarkPlugins={[remarkGfm]}
                   components={{
                     a: ({ href, children, ...props }) => {
-                      const isExternal =
-                        href &&
-                        /^https?:\/\//i.test(href) &&
-                        !href.includes(new URL(SITE.url).hostname);
+                      const isExternal = href && /^https?:\/\//i.test(href)
+                        && new URL(href).origin !== new URL(SITE.url).origin;
                       return isExternal ? (
                         <a
                           href={href}
@@ -373,6 +404,11 @@ export default function PostPage() {
                         </a>
                       );
                     },
+                    table: ({ children, ...props }) => (
+                      <div role="region" aria-label="Article table" tabIndex={0} className="my-6 max-w-full overflow-x-auto">
+                        <table {...props}>{children}</table>
+                      </div>
+                    ),
                     img: ({ src, alt, ...props }) => (
                       <OptimizedImage
                         src={typeof src === "string" ? src : ""}
@@ -485,11 +521,7 @@ export default function PostPage() {
 
               {/* Author bio card */}
               <ArticleTrustHeader
-                author={{
-                  name: authorProfile.name,
-                  role: authorProfile.role,
-                  image: authorProfile.image
-                }}
+                author={authorProfile}
                 publishedAt={post.published_at}
                 updatedAt={post.updated_at}
                 views={post.views}
@@ -499,7 +531,7 @@ export default function PostPage() {
             </div>
             {/* Sidebar */}
             <aside className="lg:col-span-1 space-y-8">
-              <TableOfContents />
+              <div className="hidden lg:block"><TableOfContents /></div>
               <TrendingSidebar />
             </aside>
           </div>

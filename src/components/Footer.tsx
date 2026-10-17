@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
 import { CATEGORIES, SITE } from "@/lib/site";
-import { Mail, Twitter, Facebook, Linkedin, Rss, MapPin, Phone, Globe } from "lucide-react";
+import { Mail, Twitter, Rss, MapPin, Globe } from "lucide-react";
+import { NewsUpdates } from "./NewsUpdates";
+import { RSS_URL } from "@/lib/endpoints";
 
 export function Footer() {
   const currentYear = new Date().getFullYear();
@@ -11,7 +13,7 @@ export function Footer() {
       <div className="container-wide py-16">
         <div className="grid gap-12 lg:grid-cols-4">
           {/* Brand and newsletter */}
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 min-w-0">
             <div className="mb-8">
               <h2 className="font-serif text-3xl font-black tracking-tighter text-headline mb-3">
                 {SITE.name}
@@ -30,22 +32,7 @@ export function Footer() {
                 <Mail className="size-5 text-primary" />
                 <h3 className="font-semibold text-headline">Stay Informed</h3>
               </div>
-              <p className="text-sm text-foreground/70 mb-4">
-                Get breaking news and analysis delivered to your inbox.
-              </p>
-              <form className="flex gap-2">
-                <input
-                  type="email"
-                  placeholder="your@email.com"
-                  className="flex-1 px-3 py-2 text-sm bg-background border border-border rounded focus:border-primary focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  className="px-4 py-2 bg-primary text-primary-foreground text-sm font-medium rounded hover:bg-primary/90 transition-colors"
-                >
-                  Subscribe
-                </button>
-              </form>
+              <NewsUpdates />
             </div>
           </div>
 
@@ -120,7 +107,7 @@ export function Footer() {
                 </Link>
               </li>
               <li>
-                <a href="/security.txt" className="text-foreground/80 hover:text-primary transition-colors">
+                <a href="/.well-known/security.txt" className="text-foreground/80 hover:text-primary transition-colors">
                   Security
                 </a>
               </li>
@@ -133,16 +120,16 @@ export function Footer() {
           <div className="grid gap-8 md:grid-cols-2">
             <div>
               <h3 className="font-semibold text-headline mb-4 uppercase tracking-wider text-sm">
-                Trending Topics
+                Explore Sections
               </h3>
               <div className="flex flex-wrap gap-2">
-                {["Breaking News", "Politics", "Technology", "Business", "Health", "Entertainment"].map(topic => (
+                {CATEGORIES.map(topic => (
                   <Link
-                    key={topic}
-                    to={`/tag/${encodeURIComponent(topic.toLowerCase().replace(' ', '-'))}`}
+                    key={topic.slug}
+                    to={`/category/${topic.slug}`}
                     className="px-3 py-1 text-xs bg-muted text-foreground/70 hover:bg-primary hover:text-primary-foreground transition-colors rounded"
                   >
-                    #{topic}
+                    {topic.name}
                   </Link>
                 ))}
               </div>
@@ -187,21 +174,15 @@ export function Footer() {
               </div>
             </div>
 
-            <div className="flex items-center gap-6">
+            <div className="flex flex-wrap items-center gap-4">
               {/* Social links */}
               <div className="flex items-center gap-3">
-                <a href={`https://twitter.com/${SITE.twitter?.replace('@', '')}`} className="text-foreground/60 hover:text-primary transition-colors">
+                {SITE.twitter && <a href={`https://twitter.com/${SITE.twitter.replace('@', '')}`} aria-label={`${SITE.name} on X`} target="_blank" rel="noopener noreferrer" className="inline-flex p-2 text-foreground/70 hover:text-primary transition-colors">
                   <Twitter className="size-4" />
-                </a>
-                <a href="#" className="text-foreground/60 hover:text-primary transition-colors">
-                  <Facebook className="size-4" />
-                </a>
-                <a href="#" className="text-foreground/60 hover:text-primary transition-colors">
-                  <Linkedin className="size-4" />
-                </a>
-                <a href="/functions/v1/rss" className="text-foreground/60 hover:text-primary transition-colors">
+                </a>}
+                {RSS_URL && <a href={RSS_URL} aria-label="NewsSparkle RSS feed" className="inline-flex p-2 text-foreground/70 hover:text-primary transition-colors">
                   <Rss className="size-4" />
-                </a>
+                </a>}
               </div>
 
               {/* Sitemap and technical links */}

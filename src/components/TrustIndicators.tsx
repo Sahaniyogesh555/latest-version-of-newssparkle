@@ -99,8 +99,8 @@ export function ArticleTrustHeader({
 
   return (
     <div className="bg-gradient-to-r from-primary/5 to-secondary/5 border border-primary/10 rounded-lg p-4 mb-6">
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
           {authorData.slug ? (
             <AuthorImage author={authorData} size="md" ring={false} />
           ) : (
@@ -108,18 +108,18 @@ export function ArticleTrustHeader({
             <img
               src={author.image || 'data:image/svg+xml,<svg/>'} 
               alt={author.name}
-              className="w-12 h-12 rounded-full object-cover ring-2 ring-primary/20 bg-muted"
+              className="w-12 h-12 shrink-0 rounded-full object-cover ring-2 ring-primary/20 bg-muted"
             />
           )}
-          <div>
-            <div className="flex items-center gap-2 mb-1">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2 mb-1">
               <span className="font-semibold text-foreground">{author.name}</span>
               <Badge variant="outline" className="badge-expert text-xs">
                 <Award className="w-3 h-3 mr-1" />
                 {author.role}
               </Badge>
             </div>
-            <div className="flex items-center gap-4 text-sm text-byline">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-byline">
               <div className="flex items-center gap-1">
                 <Clock className="w-4 h-4" />
                 Published {new Date(publishedAt).toLocaleDateString('en-US', {

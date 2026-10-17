@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { POST_CARD_COLUMNS, normalizePosts } from "@/lib/posts";
 import { Layout } from "@/components/Layout";
 import { SEO } from "@/components/SEO";
 import { PostCard } from "@/components/PostCard";
@@ -8,28 +9,37 @@ import { AuthorImage } from "@/components/AuthorImage";
 import { findAuthorBySlug } from "@/lib/authors";
 import { Post } from "@/lib/types";
 import { SITE } from "@/lib/site";
+import { LoadError } from "@/components/LoadError";
 
 export default function AuthorPage() {
   const { slug } = useParams<{ slug: string }>();
   const author = slug ? findAuthorBySlug(slug) : undefined;
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!author) return;
+    let active = true;
+    const controller = new AbortController();
     setLoading(true);
-    supabase
-      .from("posts")
-      .select("*")
-      .eq("author", author.name)
-      .eq("status", "published")
-      .order("published_at", { ascending: false })
-      .limit(30)
-      .then(({ data }) => {
-        setPosts((data as Post[]) || []);
-        setLoading(false);
-      });
-  }, [author]);
+    setError(false);
+    setPosts([]);
+    (async () => {
+      try {
+        const result = await supabase.from("posts").select(POST_CARD_COLUMNS).eq("author", author.name)
+          .eq("status", "published").order("published_at", { ascending: false }).limit(30).abortSignal(controller.signal);
+        if (result.error) throw result.error;
+        if (active) setPosts(normalizePosts(result.data));
+      } catch (cause) {
+        if (active) { console.warn("[author] Stories unavailable:", cause); setError(true); }
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; controller.abort(); };
+  }, [author, attempt]);
 
   if (!author) return <Navigate to="/404" replace />;
 
@@ -57,7 +67,7 @@ export default function AuthorPage() {
         jsonLd={personLd}
       />
       <div className="container-prose py-14">
-        <nav className="text-xs text-byline uppercase tracking-wider mb-4">
+        <nav aria-label="Breadcrumb" className="text-xs text-byline uppercase tracking-wider mb-4">
           <Link to="/" className="hover:text-primary">Home</Link> ·{" "}
           <Link to="/authors" className="hover:text-primary">Authors</Link> ·{" "}
           <span>{author.name}</span>
@@ -81,7 +91,7 @@ export default function AuthorPage() {
         <div className="rule-top mb-8 pt-4">
           <h2 className="font-serif text-2xl font-bold">Latest stories by {author.name}</h2>
         </div>
-        {loading ? (
+        {error ? <LoadError onRetry={() => setAttempt(value => value + 1)} /> : loading ? (
           <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-3 animate-pulse">
             {[...Array(6)].map((_, i) => <div key={i} className="h-72 bg-muted" />)}
           </div>

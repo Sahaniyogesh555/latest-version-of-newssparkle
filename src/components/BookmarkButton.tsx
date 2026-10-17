@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Bookmark, BookmarkCheck } from "lucide-react";
 import { bookmarks, BookmarkedPost } from "@/lib/bookmarks";
+import { toast } from "sonner";
 
 interface Props {
   post: Omit<BookmarkedPost, "saved_at">;
@@ -23,10 +24,16 @@ export function BookmarkButton({ post, size = "md", showLabel = false }: Props) 
   return (
     <button
       type="button"
-      onClick={(e) => { e.preventDefault(); e.stopPropagation(); bookmarks.toggle(post); }}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!bookmarks.toggle(post)) {
+          toast.error("Could not update saved articles. Browser storage is unavailable or full.");
+        }
+      }}
       aria-pressed={saved}
-      aria-label={saved ? "Remove bookmark" : "Save article"}
-      className={`inline-flex items-center gap-1.5 transition-colors ${saved ? "text-primary" : "text-byline hover:text-primary"}`}
+      aria-label={showLabel ? (saved ? "Saved — remove bookmark" : "Save article") : (saved ? "Remove bookmark" : "Save article")}
+      className={`relative z-10 inline-flex min-h-8 min-w-8 items-center justify-center gap-1.5 transition-colors ${saved ? "text-primary" : "text-byline hover:text-primary"}`}
     >
       <Icon className={sz} />
       {showLabel && <span className="text-xs uppercase tracking-wider">{saved ? "Saved" : "Save"}</span>}

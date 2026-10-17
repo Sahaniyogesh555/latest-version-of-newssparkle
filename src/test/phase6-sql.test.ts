@@ -1,0 +1,1058 @@
+// @vitest-environment node
+/**
+ * Phase 6.1 — migration verification against a real PostgreSQL.
+ *
+ * The migrations are executed by PostgreSQL 18 (compiled to WASM by PGlite)
+ * inside this test, in filename order, on a database seeded by the same
+ * Supabase building blocks the project runs on (stubbed: pg_cron, pg_net,
+ * Vault, auth, the anon/authenticated/service_role roles).
+ *
+ * What this proves: the SQL parses and executes, the constraints/indexes/RLS
+ * really exist afterwards, the RPCs behave as the pipeline expects, the cron
+ * migration schedules the intended jobs without duplicates, and the Vault-based
+ * trigger sends what it should. What it cannot prove: anything that depends on
+ * the Supabase platform itself (real Vault encryption, real HTTP delivery, the
+ * deployed function binaries) — those stay BLOCKED and are listed in the
+ * Phase 6.1 report.
+ */
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PGlite } from "@electric-sql/pglite";
+import {
+  MIGRATIONS_DIR,
+  SUPABASE_PRELUDE,
+  createStagingDb,
+  migrationFiles,
+  prepareMigrationSql,
+  readMigration,
+  rows,
+  scalar,
+  type StagingDb,
+} from "./harness/sql-staging.ts";
+import {
+  ACTIVATION_STEPS,
+  ALL_JOBS,
+  GATED_JOB_NAMES,
+  GATE_SQL,
+  SAFE_JOB_NAMES,
+  extractActiveStatements,
+  jobNamesInStatement,
+  normaliseSql,
+} from "./harness/cron-contract.ts";
+
+const PHASE6_SCHEMA = "20261016090000_phase6_autonomy_schema.sql";
+const PHASE6_CRONS = "20261016090100_phase6_autonomy_crons.sql";
+const PHASE6_GATE = "20261016090200_phase6_activation_gate.sql";
+const CHECKLIST = join(process.cwd(), "phase6_activation_checklist.txt");
+
+/** A database that looks like a brand-new Supabase project, before migrations. */
+async function freshPlatformDb(): Promise<PGlite> {
+  const db = await PGlite.create();
+  await db.exec(SUPABASE_PRELUDE);
+  await db.exec(`do $$
+  begin
+    if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+      create publication supabase_realtime;
+    end if;
+  end $$;`);
+  return db;
+}
+
+/** The post statuses the app and the pipeline use (posts_status_check). */
+const VALID_STATUSES = ["draft", "review", "scheduled", "published", "rejected", "archived"];
+
+
+
+let staging: StagingDb;
+
+beforeAll(async () => {
+  staging = await createStagingDb();
+}, 180_000);
+
+afterAll(async () => {
+  await staging?.close();
+});
+
+describe("migration chain", () => {
+  it("applies every migration in filename order with only the documented substitutions", () => {
+    const failures = staging.runs.filter((run) => !run.ok);
+    expect(failures.map((run) => `${run.file}: ${run.error}`)).toEqual([]);
+    expect(staging.runs).toHaveLength(migrationFiles().length);
+
+    // The only statements that had to change are the three `create extension`
+    // lines for extensions PGlite does not ship (pg_cron, pg_net, pgcrypto).
+    expect(staging.allSubstituted).toHaveLength(3);
+    expect(staging.allSubstituted.join(" ")).toContain("pg_cron");
+    expect(staging.allSubstituted.join(" ")).toContain("pg_net");
+    expect(staging.allSubstituted.join(" ")).toContain("pgcrypto");
+  });
+
+  it("keeps the Phase 6 migrations idempotent when re-applied", async () => {
+    // Supabase records applied migrations, so this is belt-and-braces: a
+    // re-run (or a partially applied migration) must not fail or duplicate data.
+    for (const file of [PHASE6_SCHEMA, PHASE6_CRONS, PHASE6_GATE]) {
+      const { sql } = prepareMigrationSql(readMigration(file));
+      await expect(staging.db.exec(sql)).resolves.not.toThrow();
+    }
+
+    const sources = await scalar<number>(staging.db, "select count(*)::int from public.content_sources");
+    expect(sources).toBe(24); // seeded once, `on conflict do nothing` kept it at 24
+    const jobs = await scalar<number>(staging.db, "select count(*)::int from cron.job");
+    expect(jobs).toBe(ALL_JOBS.length);
+    // The repair migration re-applies as a no-op: it only updates existing rows,
+    // so the gate stays closed and nothing new is scheduled.
+    const active = await scalar<number>(staging.db, "select count(*)::int from cron.job where active");
+    expect(active).toBe(SAFE_JOB_NAMES.length);
+  });
+});
+
+describe("schema objects", () => {
+  it("creates the automation tables and the new posts columns", async () => {
+    const tables = await rows<{ table_name: string }>(
+      staging.db,
+      `select table_name from information_schema.tables
+        where table_schema = 'public'
+          and table_name in ('content_sources','ingested_items','topic_trends',
+                             'pipeline_runs','agent_alerts','content_health_checks')
+        order by table_name`,
+    );
+    expect(tables.map((t) => t.table_name)).toEqual([
+      "agent_alerts",
+      "content_health_checks",
+      "content_sources",
+      "ingested_items",
+      "pipeline_runs",
+      "topic_trends",
+    ]);
+
+    const expectedColumns = [
+      "quality_score",
+      "quality_report",
+      "dedupe_fingerprint",
+      "simhash",
+      "word_count",
+      "review_reason",
+      "scheduled_for",
+      "published_by",
+      "ai_model",
+      "source_refs",
+      "image_credit",
+      "image_credit_url",
+      "source_category",
+      "attempts",
+      "last_error",
+      "next_attempt_at",
+      "archived_at",
+    ];
+    const columns = await rows<{ column_name: string }>(
+      staging.db,
+      `select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'posts'`,
+    );
+    const names = columns.map((c) => c.column_name);
+    for (const column of expectedColumns) {
+      expect(names, `posts.${column} must exist`).toContain(column);
+    }
+    expect(expectedColumns).toHaveLength(17);
+
+    const indexes = await rows<{ indexname: string }>(
+      staging.db,
+      `select indexname from pg_indexes
+        where schemaname = 'public'
+          and indexname in ('idx_posts_schedule','idx_posts_review','idx_posts_published_category_day','idx_posts_dedupe',
+                            'idx_content_sources_active','idx_ingested_items_queue','idx_ingested_items_category',
+                            'idx_ingested_items_expiry','idx_topic_trends_live','idx_pipeline_runs_recent',
+                            'idx_pipeline_runs_function','idx_agent_alerts_open','idx_content_health_recent')`,
+    );
+    expect(indexes).toHaveLength(13);
+  });
+
+  it("enforces the editorial status lifecycle and the uniqueness rules", async () => {
+    for (const status of VALID_STATUSES) {
+      await expect(
+        staging.db.exec(
+          `insert into public.posts (title, slug, excerpt, content, meta_title, meta_description, category_slug, status)
+           values ('t','slug-${status}','e','c','m','md','world','${status}')`,
+        ),
+      ).resolves.not.toThrow();
+    }
+    await expect(
+      staging.db.exec(
+        `insert into public.posts (title, slug, excerpt, content, meta_title, meta_description, category_slug, status)
+         values ('t','slug-invalid','e','c','m','md','world','half-baked')`,
+      ),
+    ).rejects.toThrow(/posts_status_check/);
+
+    // Ingested items are unique per fingerprint (the same story from two wires
+    // must collapse into one row rather than create a second candidate).
+    await staging.db.exec(
+      `insert into public.ingested_items (fingerprint, title, source_name) values ('fp-1','Story','BBC')`,
+    );
+    const duplicate = await staging.db
+      .query(`insert into public.ingested_items (fingerprint, title, source_name) values ('fp-1','Story','CNN')
+              on conflict (fingerprint) do nothing returning id`)
+      .then((result) => result.rows.length)
+      .catch(() => -1);
+    expect(duplicate).toBe(0);
+
+    // One alert per (code, subject, day): the second call bumps the counter.
+    await staging.db.exec(`select public.record_alert('queue-empty','first','warning','monitor')`);
+    await staging.db.exec(`select public.record_alert('queue-empty','second','warning','monitor')`);
+    const alert = await rows<{ message: string; occurrences: number }>(
+      staging.db,
+      `select message, occurrences from public.agent_alerts where code = 'queue-empty'`,
+    );
+    expect(alert).toHaveLength(1);
+    expect(alert[0].message).toBe("second");
+    expect(alert[0].occurrences).toBe(2);
+  });
+
+  it("keeps every automation table private (RLS on, anon/authenticated revoked)", async () => {
+    for (const table of [
+      "content_sources",
+      "ingested_items",
+      "topic_trends",
+      "pipeline_runs",
+      "agent_alerts",
+      "content_health_checks",
+    ]) {
+      const rls = await scalar<boolean>(
+        staging.db,
+        `select relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'public' and c.relname = $1`,
+        [table],
+      );
+      expect(rls, `${table} must have RLS enabled`).toBe(true);
+
+      for (const role of ["anon", "authenticated"]) {
+        const canSelect = await scalar<boolean>(
+          staging.db,
+          `select has_table_privilege($1, $2, 'SELECT')`,
+          [role, `public.${table}`],
+        );
+        const canInsert = await scalar<boolean>(
+          staging.db,
+          `select has_table_privilege($1, $2, 'INSERT')`,
+          [role, `public.${table}`],
+        );
+        expect(canSelect, `${role} must not read ${table}`).toBe(false);
+        expect(canInsert, `${role} must not write ${table}`).toBe(false);
+      }
+    }
+  });
+
+  it("keeps the public read policy on posts intact", async () => {
+    // Phase 6 changes the status lifecycle; readers must still only see published.
+    const policy = await rows<{ qual: string | null }>(
+      staging.db,
+      `select qual from pg_policies where schemaname = 'public' and tablename = 'posts' and cmd = 'SELECT'`,
+    );
+    expect(policy.length).toBeGreaterThan(0);
+    expect(policy.some((p) => (p.qual ?? "").includes("published"))).toBe(true);
+
+    const anonInsert = await scalar<boolean>(
+      staging.db,
+      `select has_table_privilege('anon', 'public.posts', 'INSERT')`,
+    );
+    expect(anonInsert).toBe(false);
+  });
+
+  it("locks down the RPCs: security definer with a fixed search_path, not executable by anon", async () => {
+    // The harness models Supabase's default privileges (EXECUTE granted to
+    // anon/authenticated at creation), which is what made the original
+    // `revoke ... from public` insufficient — audit finding F2. This test now
+    // fails if a new SECURITY DEFINER function forgets its explicit revoke.
+    const functions = [
+      "public.newsroom_trigger(text,jsonb,integer)",
+      "public.claim_ingested_items(integer)",
+      "public.category_published_count(text,timestamptz)",
+      "public.newsroom_llm_calls_today()",
+      "public.newsroom_status()",
+      "public.prune_automation_tables()",
+      "public.record_alert(text,text,text,text,jsonb)",
+      "public.trigger_auto_publish(text)",
+      "public.trigger_breaking_news_monitor()",
+      "public.trigger_notifications_dispatcher()",
+      "public.prune_post_view_events()",
+    ];
+
+    for (const signature of functions) {
+      const meta = await rows<{ prosecdef: boolean; proconfig: string[] | null }>(
+        staging.db,
+        `select prosecdef, proconfig from pg_proc where oid = $1::regprocedure`,
+        [signature],
+      );
+      expect(meta, `${signature} must exist`).toHaveLength(1);
+      expect(meta[0].prosecdef, `${signature} must be security definer`).toBe(true);
+      expect(
+        (meta[0].proconfig ?? []).some((setting) => setting.startsWith("search_path=")),
+        `${signature} must pin search_path`,
+      ).toBe(true);
+
+      for (const role of ["anon", "authenticated"]) {
+        const canExecute = await scalar<boolean>(
+          staging.db,
+          `select has_function_privilege($1, $2, 'EXECUTE')`,
+          [role, signature],
+        );
+        expect(canExecute, `${role} must not execute ${signature}`).toBe(false);
+      }
+    }
+  });
+
+  it("grants each privileged function only to the role that calls it", async () => {
+    // service_role is what the edge functions use (they hold the service key).
+    const serviceRpc = [
+      "public.claim_ingested_items(integer)",
+      "public.category_published_count(text,timestamptz)",
+      "public.newsroom_llm_calls_today()",
+      "public.newsroom_status()",
+      "public.prune_automation_tables()",
+      "public.prune_post_view_events()",
+      "public.record_alert(text,text,text,text,jsonb)",
+    ];
+    for (const signature of serviceRpc) {
+      expect(
+        await scalar<boolean>(staging.db, `select has_function_privilege('service_role', $1, 'EXECUTE')`, [signature]),
+        `service_role must be able to call ${signature}`,
+      ).toBe(true);
+    }
+
+    // The HTTP triggers carry the Vault secret. The database's own cron role
+    // (postgres) runs them; no API role may.
+    for (const signature of [
+      "public.newsroom_trigger(text,jsonb,integer)",
+      "public.trigger_auto_publish(text)",
+      "public.trigger_breaking_news_monitor()",
+      "public.trigger_notifications_dispatcher()",
+    ]) {
+      for (const role of ["anon", "authenticated", "service_role"]) {
+        expect(
+          await scalar<boolean>(staging.db, `select has_function_privilege($1, $2, 'EXECUTE')`, [role, signature]),
+          `${role} must not be able to trigger ${signature}`,
+        ).toBe(false);
+      }
+      expect(
+        await scalar<boolean>(staging.db, `select has_function_privilege('postgres', $1, 'EXECUTE')`, [signature]),
+        `postgres runs ${signature} from pg_cron`,
+      ).toBe(true);
+    }
+
+    // The one deliberate public function: the view counter.
+    for (const role of ["anon", "authenticated", "service_role"]) {
+      expect(
+        await scalar<boolean>(
+          staging.db,
+          `select has_function_privilege($1, 'public.increment_post_views(text,text)', 'EXECUTE')`,
+          [role],
+        ),
+        `${role} may bump a view counter`,
+      ).toBe(true);
+    }
+  });
+
+  it("has no SECURITY DEFINER function reachable by the public roles except the view counter", async () => {
+    // Whole-catalog sweep, so a function added later without an explicit revoke
+    // cannot slip through.
+    const exposed = await rows<{ signature: string }>(
+      staging.db,
+      `select p.oid::regprocedure::text as signature
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and p.prosecdef
+          and (has_function_privilege('anon', p.oid, 'EXECUTE')
+               or has_function_privilege('authenticated', p.oid, 'EXECUTE'))
+        order by 1`,
+    );
+    expect(exposed.map((row) => row.signature)).toEqual(["increment_post_views(text,text)"]);
+  });
+});
+
+describe("privilege boundaries across the migration chain", () => {
+  /**
+   * The deliberate privilege policy, per SECURITY DEFINER function.
+   *
+   *   postgres       owner, and the role pg_cron runs the job as
+   *   service_role   the edge functions (they hold the service key)
+   *   anon, authenticated  the public API roles: only the view counter
+   *
+   * `db push` applies one file per transaction, so the check below runs this
+   * policy against the catalog after EVERY file — not only at the end of the
+   * chain. A migration that creates a privileged function without locking it
+   * down fails here, at the boundary where it happens.
+   */
+  /** regprocedure renders `timestamptz` as `timestamp with time zone`. */
+  const normaliseSignature = (signature: string) =>
+    signature
+      .replace(/^public\./, "")
+      .replace(/timestamp with time zone/g, "timestamptz")
+      .replace(/timestamp without time zone/g, "timestamp");
+
+  /**
+   * Signatures that exist for part of the chain only. `increment_post_views(text)`
+   * is the original 1-argument counter; 20260503120252 replaces it with a
+   * SECURITY INVOKER version, so it is no longer a privileged function at the
+   * end of the chain — but the early boundaries still have to be checked.
+   */
+  const RETIRED_SIGNATURES = ["increment_post_views(text)"];
+
+  const EXPECTED: Record<string, string[]> = {
+    // The one deliberate public RPC. (The 1-argument overload existed before
+    // 20260503120252 replaced it with a SECURITY INVOKER version.)
+    "increment_post_views(text)": ["anon", "authenticated", "postgres", "service_role"],
+    "increment_post_views(text,text)": ["anon", "authenticated", "postgres", "service_role"],
+    // Retention: pg_cron and the monitor only.
+    "prune_post_view_events()": ["postgres", "service_role"],
+    "prune_automation_tables()": ["postgres", "service_role"],
+    // Data RPCs called by the edge functions with the service key.
+    "record_alert(text,text,text,text,jsonb)": ["postgres", "service_role"],
+    "claim_ingested_items(integer)": ["postgres", "service_role"],
+    "category_published_count(text,timestamptz)": ["postgres", "service_role"],
+    "newsroom_llm_calls_today()": ["postgres", "service_role"],
+    "newsroom_status()": ["postgres", "service_role"],
+    // HTTP triggers: they make the database send a request carrying the Vault
+    // secret, so pg_cron is the only caller. service_role is excluded on
+    // purpose.
+    "newsroom_trigger(text,jsonb,integer)": ["postgres"],
+    "trigger_auto_publish(text)": ["postgres"],
+    "trigger_breaking_news_monitor()": ["postgres"],
+    "trigger_notifications_dispatcher()": ["postgres"],
+  };
+
+  it("applies least privilege after every migration, not just at the end", async () => {
+    const db = await freshPlatformDb();
+    try {
+      const failures: string[] = [];
+      const files = migrationFiles();
+
+      for (const file of files) {
+        await db.exec(prepareMigrationSql(readMigration(file)).sql);
+
+        // aclexplode rather than has_function_privilege: postgres is the
+        // superuser in this harness, so a superuser check would always say
+        // yes and would not show what the ACL actually grants. aclexplode
+        // reports the stored grants, including the owner's own entry.
+        const granted = await rows<{ signature: string; grantee: string }>(
+          db,
+          `select p.oid::regprocedure::text as signature,
+                  case when a.grantee = 0 then 'PUBLIC'
+                       else pg_get_userbyid(a.grantee) end as grantee
+             from pg_proc p
+             join pg_namespace n on n.oid = p.pronamespace
+             cross join lateral aclexplode(
+               coalesce(p.proacl, acldefault('f', p.proowner))
+             ) a
+            where n.nspname = 'public'
+              and p.prosecdef
+              and a.privilege_type = 'EXECUTE'
+            order by 1, 2`,
+        );
+
+        const byFunction = new Map<string, Set<string>>();
+        for (const row of granted) {
+          const signature = normaliseSignature(row.signature);
+          const roles = byFunction.get(signature) ?? new Set<string>();
+          roles.add(row.grantee);
+          byFunction.set(signature, roles);
+        }
+
+        for (const [signature, roles] of byFunction) {
+          const expected = EXPECTED[signature];
+          if (!expected) {
+            failures.push(
+              `${file}: ${signature} is a SECURITY DEFINER function with no declared privilege policy`,
+            );
+            continue;
+          }
+          const actual = [...roles].sort();
+          const wanted = [...expected].sort();
+          if (actual.join(",") !== wanted.join(",")) {
+            failures.push(`${file}: ${signature} grants [${actual.join(", ")}] but must grant [${wanted.join(", ")}]`);
+          }
+          if (roles.has("PUBLIC")) {
+            failures.push(`${file}: ${signature} is executable by PUBLIC`);
+          }
+        }
+
+        // The review criterion, stated directly: at no boundary may a public
+        // role reach a privileged function other than the view counter.
+        for (const [signature, roles] of byFunction) {
+          for (const role of ["anon", "authenticated"]) {
+            if (roles.has(role) && !(EXPECTED[signature] ?? []).includes(role)) {
+              failures.push(`${file}: ${role} can execute ${signature} at this boundary`);
+            }
+          }
+        }
+      }
+
+      expect(failures).toEqual([]);
+    } finally {
+      await db.close();
+    }
+  }, 180_000);
+
+  it("keeps the real callers working and refuses the public roles", async () => {
+    // ACLs are necessary but not sufficient: prove the roles that must call
+    // these functions still can, and that the public roles get "permission
+    // denied" rather than a silent success.
+    const db = await freshPlatformDb();
+    try {
+      for (const file of migrationFiles()) {
+        await db.exec(prepareMigrationSql(readMigration(file)).sql);
+      }
+
+      // service_role — the edge functions' role.
+      await db.exec("set role service_role");
+      await db.exec("select public.record_alert('review_probe', 'post-migration probe')");
+      expect(await scalar<boolean>(db, "select public.newsroom_status() is not null")).toBe(true);
+      await db.exec("reset role");
+
+      // pg_cron's role — it owns every function, so EXECUTE is implied.
+      await db.exec("set role postgres");
+      await db.exec("select public.prune_post_view_events()");
+      await db.exec("reset role");
+
+      // The public roles: the view counter works, everything else is denied.
+      for (const role of ["anon", "authenticated"]) {
+        await db.exec(`set role ${role}`);
+        await db.exec("select public.increment_post_views('review-probe-no-such-slug', 'review-probe-visitor')");
+        await expect(
+          db.exec("select public.newsroom_status()"),
+          `${role} must be denied newsroom_status()`,
+        ).rejects.toThrow(/permission denied/);
+        await expect(
+          db.exec("select public.trigger_auto_publish('morning')"),
+          `${role} must be denied trigger_auto_publish()`,
+        ).rejects.toThrow(/permission denied/);
+        await db.exec("reset role");
+      }
+    } finally {
+      await db.close();
+    }
+  }, 180_000);
+
+  it("declares a policy for every SECURITY DEFINER function the chain produces", async () => {
+    // Guards the table above: a function added later without an entry would
+    // otherwise be reported only by the boundary test, one file at a time.
+    const db = await freshPlatformDb();
+    try {
+      for (const file of migrationFiles()) {
+        await db.exec(prepareMigrationSql(readMigration(file)).sql);
+      }
+      const signatures = await rows<{ signature: string }>(
+        db,
+        `select p.oid::regprocedure::text as signature
+           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'public' and p.prosecdef
+          order by 1`,
+      );
+      const present = signatures.map((row) => normaliseSignature(row.signature));
+      const undeclared = present.filter((signature) => !(signature in EXPECTED));
+      expect(undeclared, "every SECURITY DEFINER function needs a policy entry").toEqual([]);
+
+      const vanished = Object.keys(EXPECTED).filter(
+        (signature) => !present.includes(signature) && !RETIRED_SIGNATURES.includes(signature),
+      );
+      expect(vanished, "policy entries that no longer match a real function").toEqual([]);
+    } finally {
+      await db.close();
+    }
+  }, 180_000);
+});
+
+describe("candidate queue RPC", () => {
+  it("claims the highest-priority candidate exactly once", async () => {
+    await staging.db.exec(`
+      insert into public.ingested_items (fingerprint, title, source_name, trust_tier, trend_score, corroboration)
+      values
+        ('fp-strong',  'Trending story',        'Reuters', 1, 80, 3),
+        ('fp-average', 'Ordinary story',        'Blog',    3, 0,  1),
+        ('fp-expired', 'Expired story',         'Blog',    3, 0,  1),
+        ('fp-later',   'Retry later',           'Blog',    3, 0,  1);
+      update public.ingested_items set expires_at = now() - interval '1 hour' where fingerprint = 'fp-expired';
+      update public.ingested_items set next_attempt_at = now() + interval '1 hour' where fingerprint = 'fp-later';
+    `);
+
+    const first = await rows<{ fingerprint: string; status: string; attempts: number }>(
+      staging.db,
+      `select fingerprint, status, attempts from public.claim_ingested_items(2)`,
+    );
+    const claimed = first.map((row) => row.fingerprint);
+    // Tier 1 (Reuters) outranks everything; tier 2 outranks tier 3.
+    expect(claimed).toContain("fp-strong");
+    expect(claimed).toContain("fp-1"); // tier 2 from the uniqueness test above
+    // Expired candidates and ones inside a retry backoff are never handed out.
+    expect(claimed).not.toContain("fp-expired");
+    expect(claimed).not.toContain("fp-later");
+    expect(first.every((row) => row.status === "processing")).toBe(true);
+    expect(first.every((row) => row.attempts === 1)).toBe(true);
+
+    // Repeated execution (overlapping cron runs, e.g. 20-minute ingest ticks
+    // colliding with a 30-minute write-desk tick) must never re-claim a row.
+    const second = await rows<{ fingerprint: string }>(
+      staging.db,
+      `select fingerprint from public.claim_ingested_items(5)`,
+    );
+    const reclaimed = second.map((row) => row.fingerprint);
+    expect(reclaimed).not.toContain("fp-strong");
+    expect(reclaimed).not.toContain("fp-1");
+    expect(reclaimed).toEqual(["fp-average"]); // the only untouched candidate
+
+    const attempts = await rows<{ attempts: number }>(
+      staging.db,
+      `select attempts from public.ingested_items where fingerprint in ('fp-strong','fp-1','fp-average')`,
+    );
+    expect(attempts.map((row) => row.attempts)).toEqual([1, 1, 1]);
+  });
+
+  it("counts published and scheduled posts per category and reports status", async () => {
+    await staging.db.exec(`
+      insert into public.posts (title, slug, excerpt, content, meta_title, meta_description, category_slug, status, published_at)
+      values ('Published today','pub-today','e','c','m','md','business','published', now()),
+             ('Scheduled today','sched-today','e','c','m','md','business','scheduled', now())
+      on conflict (slug) do nothing;
+      insert into public.pipeline_runs (function, ok, items_in, items_out, llm_calls)
+      values ('write-desk', true, 2, 1, 3), ('ingest-feeds', true, 10, 4, 0);
+    `);
+
+    const perCategory = await scalar<number>(
+      staging.db,
+      `select public.category_published_count('business', date_trunc('day', now() at time zone 'utc'))`,
+    );
+    expect(perCategory).toBe(2);
+
+    const llmCalls = await scalar<number>(staging.db, `select public.newsroom_llm_calls_today()`);
+    expect(llmCalls).toBe(3);
+
+    const status = await scalar<Record<string, Record<string, unknown>>>(
+      staging.db,
+      `select public.newsroom_status()`,
+    );
+    expect(Object.keys(status).sort()).toEqual([
+      "alerts",
+      "candidates",
+      "generated_at",
+      "llm",
+      "pipeline",
+      "posts",
+      "sources",
+      "trends",
+    ]);
+    expect(Number(status.posts.published_total)).toBeGreaterThan(0);
+    expect(status.llm.calls_today).toBe(3);
+    expect(status.candidates.processing).toBe(3);
+  });
+
+  it("prunes only what is past retention", async () => {
+    await staging.db.exec(`
+      update public.ingested_items set expires_at = now() - interval '10 days' where fingerprint = 'fp-expired';
+      insert into public.pipeline_runs (function, ok, started_at) values ('old-run', true, now() - interval '40 days');
+      insert into public.content_health_checks (kind, ok, created_at) values ('old-check', true, now() - interval '40 days');
+      insert into public.topic_trends (topic, topic_key, expires_at) values ('old trend','old trend', now() - interval '10 days');
+      insert into public.agent_alerts (code, subject, message, resolved_at)
+      values ('resolved-old','x','y', now() - interval '90 days');
+    `);
+
+    await staging.db.exec(`select public.prune_automation_tables()`);
+
+    expect(await scalar<number>(staging.db, `select count(*)::int from public.ingested_items where fingerprint = 'fp-expired'`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from public.pipeline_runs where function = 'old-run'`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from public.content_health_checks where kind = 'old-check'`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from public.topic_trends where topic_key = 'old trend'`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from public.agent_alerts where code = 'resolved-old'`)).toBe(0);
+
+    // Fresh rows survive.
+    expect(await scalar<number>(staging.db, `select count(*)::int from public.ingested_items where status = 'processing'`)).toBe(3);
+  });
+});
+
+describe("cron schedule and the Vault trigger", () => {
+  it("schedules exactly the intended jobs, once each, with the intended schedules", async () => {
+    const jobs = await rows<{ jobname: string; schedule: string; command: string; active: boolean }>(
+      staging.db,
+      `select jobname, schedule, command, active from cron.job order by jobname`,
+    );
+
+    expect(jobs).toHaveLength(ALL_JOBS.length);
+    for (const expected of ALL_JOBS) {
+      const job = jobs.find((entry) => entry.jobname === expected.name);
+      expect(job, `${expected.name} must be scheduled`).toBeDefined();
+      expect(job?.schedule).toBe(expected.schedule);
+      // Whitespace-insensitive: the migration wraps the SQL over two lines.
+      expect(job?.command.replace(/\s+/g, " ").trim()).toBe(expected.command);
+    }
+
+    // Names are asserted exactly, so a renamed or added job fails loudly.
+    expect(jobs.map((job) => job.jobname).sort()).toEqual([...ALL_JOBS.map((job) => job.name)].sort());
+  });
+
+  it("creates the gate set inactive and the safe jobs active on a fresh install", async () => {
+    // The fail-closed guarantee: a fresh `db push` must not leave any job that
+    // can publish, queue with LLM budget, alert readers or archive published
+    // content in an executing state.
+    const gated = await rows<{ jobname: string; active: boolean }>(
+      staging.db,
+      `select jobname, active from cron.job where jobname = any($1) order by jobname`,
+      [GATED_JOB_NAMES],
+    );
+    expect(gated.map((row) => row.jobname).sort()).toEqual([...GATED_JOB_NAMES].sort());
+    expect(gated.map((row) => row.jobname)).toHaveLength(GATED_JOB_NAMES.length);
+    expect(gated.every((row) => row.active === false), "every gate job must be inactive").toBe(true);
+
+    const safe = await rows<{ jobname: string; active: boolean }>(
+      staging.db,
+      `select jobname, active from cron.job where jobname = any($1) order by jobname`,
+      [SAFE_JOB_NAMES],
+    );
+    expect(safe.map((row) => row.jobname).sort()).toEqual([...SAFE_JOB_NAMES].sort());
+    expect(safe).toHaveLength(SAFE_JOB_NAMES.length);
+    expect(safe.every((row) => row.active === true), "ingestion and monitoring must stay on").toBe(true);
+
+    // Counts, so "8 inactive / 6 active" in the docs is a checked fact.
+    expect(GATED_JOB_NAMES).toHaveLength(8);
+    expect(SAFE_JOB_NAMES).toHaveLength(6);
+    expect(GATED_JOB_NAMES.length + SAFE_JOB_NAMES.length).toBe(ALL_JOBS.length);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`)).toBe(8);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+  });
+
+  it("keeps the gate closed when the migrations are re-applied", async () => {
+    // supabase db reset / a manual re-apply must not open the gate. The
+    // migration unschedules and recreates the jobs, so the gate set is rebuilt
+    // inactive and the safe jobs are rebuilt active.
+    for (const file of [PHASE6_SCHEMA, PHASE6_CRONS, PHASE6_GATE]) {
+      const { sql } = prepareMigrationSql(readMigration(file));
+      await expect(staging.db.exec(sql)).resolves.not.toThrow();
+    }
+
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`)).toBe(8);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+
+    const schedulePreserved = await rows<{ jobname: string; schedule: string; command: string }>(
+      staging.db,
+      `select jobname, schedule, command from cron.job where jobname = any($1)`,
+      [ALL_JOBS.map((job) => job.name)],
+    );
+    for (const expected of ALL_JOBS) {
+      const job = schedulePreserved.find((entry) => entry.jobname === expected.name);
+      expect(job?.schedule, `${expected.name} schedule must survive a re-apply`).toBe(expected.schedule);
+      expect(job?.command.replace(/\s+/g, " ").trim()).toBe(expected.command);
+    }
+  });
+
+  it("keeps the gate closed if the operator activates jobs and the files are re-applied", async () => {
+    // Fail-closed means: re-applying the migration set resets the gate even if
+    // somebody had enabled jobs. The checklist documents that a re-apply
+    // requires re-running the activation steps.
+    await staging.db.exec(ACTIVATION_STEPS[0].sql);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(8);
+
+    for (const file of [PHASE6_CRONS, PHASE6_GATE]) {
+      const { sql } = prepareMigrationSql(readMigration(file));
+      await staging.db.exec(sql);
+    }
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+  });
+
+  it("opens only through the documented activation steps, and only the documented jobs", async () => {
+    // The SQL here is read from phase6_activation_checklist.txt, not typed into
+    // this test: the operator's commands are the ones under test.
+    const checklist = readFileSync(CHECKLIST, "utf8");
+    const documented = extractActiveStatements(checklist, "true")
+      .filter((statement) => jobNamesInStatement(statement).length > 0);
+
+    const expected = ACTIVATION_STEPS.map((step) => normaliseSql(step.sql));
+    expect(documented).toEqual(expected);
+
+    for (const step of ACTIVATION_STEPS) {
+      await staging.db.exec(step.sql);
+
+      const active = await rows<{ jobname: string }>(
+        staging.db,
+        `select jobname from cron.job where active and jobname is not null order by jobname`,
+      );
+      const enabled = active
+        .map((row) => row.jobname)
+        .filter((name) => GATED_JOB_NAMES.includes(name))
+        .sort();
+      expect(enabled, `after ${step.id} exactly the approved gate jobs are live`).toEqual(
+        [...step.activeAfter].sort(),
+      );
+      expect(step.enables.length).toBeGreaterThan(0);
+      // The safe jobs must never be touched by an activation step.
+      for (const name of SAFE_JOB_NAMES) {
+        expect(await scalar<boolean>(staging.db, `select active from cron.job where jobname = $1`, [name])).toBe(true);
+      }
+    }
+
+    // Nothing outside the gate set can ever be enabled by a documented step.
+    for (const step of ACTIVATION_STEPS) {
+      for (const name of step.enables) {
+        expect(GATED_JOB_NAMES, `${name} must be a gate job`).toContain(name);
+      }
+    }
+  });
+
+  it("closes the gate with the canonical statement, and the deep-clean statement is reversible", async () => {
+    // Reset to the post-migration state, then run the one canonical gate
+    // statement the migration, the checklist and OPERATIONS.md all embed.
+    await staging.db.exec(`update cron.job set active = true`);
+    await staging.db.exec(GATE_SQL);
+
+    const inactive = await rows<{ jobname: string }>(
+      staging.db,
+      `select jobname from cron.job where not active order by jobname`,
+    );
+    expect(inactive.map((row) => row.jobname)).toEqual([...GATED_JOB_NAMES].sort());
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where not active`)).toBe(8);
+
+    // Resume everything: one statement, reversible, deletes nothing.
+    await staging.db.exec(`update cron.job set active = true`);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(14);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+
+    // Stop everything: the documented "stop all automation" form.
+    await staging.db.exec(`update cron.job set active = false`);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(0);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job`)).toBe(14);
+
+    // The API form for a single job (pg_cron 1.4+) also works, for the role
+    // that owns the job: alter_job is REVOKEd from public.
+    await staging.db.exec(`select cron.alter_job(jobid, active := true) from cron.job where jobname = 'write-desk'`);
+    expect(await scalar<boolean>(staging.db, `select active from cron.job where jobname = 'write-desk'`)).toBe(true);
+
+    // Leave the database in the post-migration state for the tests below.
+    await staging.db.exec(`update cron.job set active = false`);
+    await staging.db.query(`update cron.job set active = true where jobname = any($1)`, [SAFE_JOB_NAMES]);
+  });
+
+  it("uses the gate API the platform actually permits, not a direct UPDATE", async () => {
+    // Supabase gives `postgres` SELECT only on cron.job. A direct UPDATE is
+    // rejected by a role that only has what the platform grants (audit F1).
+    const db = await freshPlatformDb();
+    try {
+      await db.exec(`
+        do $$ begin
+          if not exists (select 1 from pg_roles where rolname = 'ops_deployer') then
+            create role ops_deployer nologin;
+          end if;
+        end $$;
+        grant usage on schema cron to ops_deployer;
+        grant select on table cron.job to ops_deployer;
+        set role ops_deployer;`);
+      await expect(
+        db.exec(`update cron.job set active = false where jobname = 'write-desk'`),
+        "a direct UPDATE on cron.job must be denied to a SELECT-only role",
+      ).rejects.toThrow(/permission denied/i);
+      await db.exec(`reset role`);
+    } finally {
+      await db.close();
+    }
+
+    // The replacement is an API call whose body runs as the extension owner,
+    // so EXECUTE is enough.
+    const meta = await rows<{ prosecdef: boolean; proacl: string | null }>(
+      staging.db,
+      `select prosecdef, proacl::text from pg_proc
+        where oid = 'cron.alter_job(bigint,text,text,text,text,boolean)'::regprocedure`,
+    );
+    expect(meta).toHaveLength(1);
+    expect(meta[0].prosecdef, "alter_job must be security definer").toBe(true);
+    expect(
+      await scalar<boolean>(staging.db, `select has_function_privilege('postgres', 'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE')`),
+      "Supabase grants cron functions to postgres",
+    ).toBe(true);
+
+    // No migration may reintroduce the unsupported form.
+    for (const file of migrationFiles()) {
+      const text = readMigration(file).replace(/--[^\n]*/g, "");
+      expect(text, `${file} must not UPDATE cron.job directly`).not.toMatch(/update\s+cron\.job/i);
+    }
+  });
+
+  it("the gate changes only `active`, never a schedule or a command", async () => {
+    const before = await rows<{ jobname: string; schedule: string; command: string }>(
+      staging.db,
+      `select jobname, schedule, command from cron.job where jobname = any($1) order by jobname`,
+      [ALL_JOBS.map((job) => job.name)],
+    );
+    await staging.db.exec(GATE_SQL);
+    const after = await rows<{ jobname: string; schedule: string; command: string }>(
+      staging.db,
+      `select jobname, schedule, command from cron.job where jobname = any($1) order by jobname`,
+      [ALL_JOBS.map((job) => job.name)],
+    );
+    expect(after).toEqual(before);
+    expect(await scalar<number>(staging.db, `select count(*)::int from cron.job where active`)).toBe(6);
+  });
+
+  it("runs the gate on a project that has no jobs yet without failing", async () => {
+    // Fresh install: the repair migration is intentionally a no-op there.
+    const db = await freshPlatformDb();
+    try {
+      const { sql } = prepareMigrationSql(readMigration(PHASE6_GATE));
+      await expect(db.exec(sql)).resolves.not.toThrow();
+      expect(await scalar<number>(db, `select count(*)::int from cron.job`)).toBe(0);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("never leaves a publishing-capable job active at any point in the chain", async () => {
+    // `db push` commits one file at a time, so every prefix of the chain is a
+    // state a project can actually be left in (audit F4). The legacy
+    // migrations used to create publishing jobs ACTIVE.
+    const db = await freshPlatformDb();
+    try {
+      const observed: string[] = [];
+      for (const file of migrationFiles()) {
+        const { sql } = prepareMigrationSql(readMigration(file));
+        await db.exec(sql);
+        const snapshot = await rows<{ jobname: string | null; active: boolean }>(
+          db,
+          `select jobname, active from cron.job where active order by jobname`,
+        );
+        const activeNames = snapshot.map((row) => row.jobname ?? "(unnamed)");
+        observed.push(`${file}: ${activeNames.join(",") || "(none)"}`);
+        for (const name of activeNames) {
+          expect(
+            SAFE_JOB_NAMES,
+            `${file} left ${name} active — only ingestion/monitoring/retention may run before preflight`,
+          ).toContain(name);
+        }
+      }
+      // End state: exactly the six safe jobs.
+      const final = await rows<{ jobname: string }>(db, `select jobname from cron.job where active order by jobname`);
+      expect(final.map((row) => row.jobname)).toEqual([...SAFE_JOB_NAMES].sort());
+      expect(observed.length).toBe(migrationFiles().length);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("replaces the previous schedule rather than stacking a second one", async () => {
+    // The migration unschedules the Phase 5 job names first; a re-run must not
+    // leave two jobs pointing at the same function.
+    const duplicated = await rows<{ jobname: string; n: number }>(
+      staging.db,
+      `select jobname, count(*)::int as n from cron.job where jobname is not null group by jobname having count(*) > 1`,
+    );
+    expect(duplicated).toEqual([]);
+
+    const retired = ["validate-feeds", "auto-publish", "newsroom-monitor", "publish-scheduler-legacy"];
+    const leftover = await rows<{ jobname: string }>(
+      staging.db,
+      `select jobname from cron.job where jobname = any($1)`,
+      [retired],
+    );
+    // The Phase 5 job names the migration unschedules must not reappear.
+    expect(leftover).toEqual([]);
+
+    // ...while the Phase 5 helpers the app already relied on stay wired up.
+    const helpers = await rows<{ jobname: string; command: string }>(
+      staging.db,
+      `select jobname, command from cron.job where jobname in ('auto-publish-morning','breaking-news-monitor','notifications-dispatcher')`,
+    );
+    expect(helpers).toHaveLength(3);
+    expect(helpers.every((h) => /public\.(trigger_auto_publish|trigger_breaking_news_monitor|trigger_notifications_dispatcher)\(/.test(h.command))).toBe(true);
+  });
+
+  it("posts to the right URL with the Vault secret and never logs the value", async () => {
+    const secretValue = "test-secret-value-not-a-real-credential";
+    await staging.db.exec(`select vault.create_secret('${secretValue}', 'auto_publish_secret', 'staging test')`);
+    // F3: the host is mandatory and comes from Vault — there is no fallback.
+    await staging.db.exec(
+      `select vault.create_secret('https://audit-probe.supabase.co', 'newsroom_base_url', 'staging test')`,
+    );
+
+    const requestId = await scalar<bigint>(
+      staging.db,
+      `select public.newsroom_trigger('write-desk', '{"limit":1}'::jsonb, 60000)`,
+    );
+    expect(Number(requestId)).toBeGreaterThan(0);
+
+    const captured = await rows<{ url: string; headers: Record<string, string>; body: Record<string, unknown>; timeout_ms: number }>(
+      staging.db,
+      `select url, headers, body, timeout_ms from net.captured_requests where id = $1`,
+      [Number(requestId)],
+    );
+    expect(captured).toHaveLength(1);
+    expect(captured[0].url).toBe("https://audit-probe.supabase.co/functions/v1/write-desk");
+    expect(captured[0].headers["Content-Type"]).toBe("application/json");
+    expect(captured[0].headers.Authorization).toBe(`Bearer ${secretValue}`);
+    expect(captured[0].body).toEqual({ limit: 1 });
+    expect(captured[0].timeout_ms).toBe(60000);
+
+    // The secret lives only in Vault: not in the migrations, not in the repo.
+    const migrationText = readMigration(PHASE6_CRONS);
+    expect(migrationText).not.toContain(secretValue);
+    expect(migrationText).not.toContain("Bearer eyJ");
+    expect(readFileSync(join(MIGRATIONS_DIR, PHASE6_SCHEMA), "utf8")).not.toContain(secretValue);
+  });
+
+  it("fails closed when the newsroom base URL is missing or not https", async () => {
+    // The old code fell back to a hard-coded project URL. That turned a missing
+    // Vault row into traffic for another project, carrying this project's
+    // bearer token. It must raise instead — nothing is sent.
+    const before = await scalar<number>(staging.db, `select count(*)::int from net.captured_requests`);
+
+    await staging.db.exec(`delete from vault.secrets where name = 'newsroom_base_url'`);
+    await expect(staging.db.exec(`select public.newsroom_trigger('write-desk')`)).rejects.toThrow(
+      /newsroom_base_url missing or invalid/,
+    );
+
+    await staging.db.exec(`select vault.create_secret('http://insecure.example.co', 'newsroom_base_url', 'staging')`);
+    await expect(staging.db.exec(`select public.newsroom_trigger('write-desk')`)).rejects.toThrow(
+      /newsroom_base_url missing or invalid/,
+    );
+
+    const after = await scalar<number>(staging.db, `select count(*)::int from net.captured_requests`);
+    expect(after, "a refused trigger must not queue an HTTP request").toBe(before);
+
+    await staging.db.exec(
+      `select vault.create_secret('https://audit-probe.supabase.co', 'newsroom_base_url', 'staging')`,
+    );
+  });
+
+  it("only forwards the function names on the allow-list", async () => {
+    // The docs used to claim an allow-list that did not exist. It exists now:
+    // the name is validated, not concatenated into a URL.
+    for (const name of ["../v1/admin", "unknown-function", "sitemap"]) {
+      await expect(staging.db.exec(`select public.newsroom_trigger('${name}')`)).rejects.toThrow(
+        /is not an approved function/,
+      );
+    }
+    // Every scheduled target is accepted.
+    for (const name of [
+      "ingest-feeds", "write-desk", "publish-scheduler", "trend-watch",
+      "maintenance", "phase6-monitor", "validate-feeds",
+      "auto-publish", "breaking-news-monitor", "notifications-dispatcher",
+    ]) {
+      await expect(staging.db.exec(`select public.newsroom_trigger('${name}')`)).resolves.not.toThrow();
+    }
+  });
+
+  it("respects a custom base URL from Vault and warns when the secret is absent", async () => {
+    await staging.db.exec(`select vault.create_secret('https://staging.example.co', 'newsroom_base_url', 'staging')`);
+    const id = await scalar<bigint>(staging.db, `select public.newsroom_trigger('ingest-feeds')`);
+    const url = await scalar<string>(
+      staging.db,
+      `select url from net.captured_requests where id = $1`,
+      [Number(id)],
+    );
+    expect(url).toBe("https://staging.example.co/functions/v1/ingest-feeds");
+
+    // Missing secret → the request is still attempted with an empty bearer and
+    // Postgres raises a warning; the function must not crash the cron job.
+    await staging.db.exec(`delete from vault.secrets where name = 'auto_publish_secret'`);
+    await expect(staging.db.exec(`select public.newsroom_trigger('ingest-feeds')`)).resolves.not.toThrow();
+    const bearer = await scalar<string>(
+      staging.db,
+      `select headers->>'Authorization' from net.captured_requests order by id desc limit 1`,
+    );
+    expect(bearer).toBe("Bearer ");
+  });
+});

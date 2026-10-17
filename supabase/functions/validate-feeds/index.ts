@@ -1,13 +1,10 @@
 // Validates sitemap.xml, news-sitemap, and RSS feed for common SEO/formatting issues.
 // Returns a JSON report and logs errors to the function log.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { json, preflight } from "../_shared/http.ts";
+import { requireSecret } from "../_shared/auth.ts";
 
 const SITE_URL = Deno.env.get("SITE_URL") || "https://newssparkle.lovable.app";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
 
 type Issue = { level: "error" | "warning"; feed: string; message: string };
 
@@ -124,7 +121,11 @@ function validateRss(name: string, body: string, contentType: string): Issue[] {
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight();
+
+  // Reads public feeds but persists a report row; keep it behind the secret.
+  const denied = requireSecret(req, { envVars: ["AUTO_PUBLISH_SECRET", "CRON_SECRET"] });
+  if (denied) return denied;
 
   const FN_BASE = `${Deno.env.get("SUPABASE_URL")}/functions/v1`;
   const targets = [
@@ -165,8 +166,5 @@ Deno.serve(async (req) => {
     });
   } catch (_) { /* table optional */ }
 
-  return new Response(JSON.stringify({ ok: errors === 0, errors, warnings, report }, null, 2), {
-    status: errors === 0 ? 200 : 422,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  return json({ ok: errors === 0, errors, warnings, report }, errors === 0 ? 200 : 422);
 });

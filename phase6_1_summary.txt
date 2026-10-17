@@ -1,0 +1,885 @@
+REVIEW FOLLOW-UP — F2 MIGRATION-ORDER GAP (commit b5d944a reviewed)
+==================================================================
+Finding: the Phase 0 repair migration 20261017090000 closed the privilege hole
+only at the END of the chain. Everything between the file that created a
+SECURITY DEFINER function and that repair was still exposed, and `db push`
+commits one file at a time, so the exposure is real on a fresh project.
+
+Window that existed at b5d944a (measured per file boundary):
+  after 20260503120214  increment_post_views(text)   anon/authenticated (intended)
+  after 20261015120100  prune_post_view_events()     anon/authenticated  <-- wrong
+  after 20261015120200  trigger_auto_publish(text),
+                        trigger_breaking_news_monitor(),
+                        trigger_notifications_dispatcher()
+                                                    anon/authenticated  <-- wrong
+  after 20261016090000  record_alert, claim_ingested_items,
+                        category_published_count, newsroom_llm_calls_today,
+                        newsroom_status, prune_automation_tables
+                                                    anon/authenticated  <-- wrong
+  after 20261016090100  newsroom_trigger()          anon/authenticated  <-- wrong
+  after 20261016090200  (gate only; no change to the ACLs)
+  after 20261017090000  closed
+The worst of it: an anon-key holder could call the publishing triggers and the
+Vault-secret-bearing newsroom_trigger from 20261015120200 until the repair
+migration ran — and permanently on a project that stopped pushing at or before
+20261016090100.
+
+FIX — grants are applied in the file that creates the function
+--------------------------------------------------------------
+Eight migrations now carry the least-privilege block themselves, in the same
+file as the CREATE, before any cron job that depends on them is scheduled:
+  20260503120214  increment_post_views(text) + touch_updated_at
+  20260503120234  touch_updated_at (re-created; ACL re-asserted)
+  20261015120000  increment_post_views(text,text)
+  20261015120100  prune_post_view_events
+  20261015120200  trigger_auto_publish, trigger_breaking_news_monitor,
+                  trigger_notifications_dispatcher
+  20261016090000  the six Phase 6 RPCs (header explains the rule)
+  20261016090100  newsroom_trigger + the three Phase-5 helpers
+  20261017090000  unchanged - still the idempotent backstop for projects that
+                  already applied the old versions
+Nothing was granted to PUBLIC. The four-role revoke
+(public, anon, authenticated, service_role) is used everywhere, because the
+Supabase default privileges grant EXECUTE to the three API roles directly at
+creation and `revoke ... from public` does not remove those.
+
+GRANTS PRESERVED (review point 4)
+---------------------------------
+  service_role: increment_post_views(text,text), record_alert,
+                claim_ingested_items, category_published_count,
+                newsroom_llm_calls_today, newsroom_status,
+                prune_automation_tables, prune_post_view_events
+  postgres:     the four HTTP triggers + both prunes (pg_cron)
+  anon/auth:    increment_post_views only
+  Edge-function callers read the same RPCs as before; no function signature,
+  body or SECURITY DEFINER property changed in this follow-up.
+
+NEW REGRESSION TEST (review point 3)
+------------------------------------
+src/test/phase6-sql.test.ts, "privilege boundaries across the migration chain":
+  - applies the chain one file at a time and, after EVERY file, reads
+    aclexplode(pg_proc.proacl) for every SECURITY DEFINER function in public;
+  - compares the exact grantee set against a declared policy table;
+  - fails at the boundary where the grant first appears, naming the file and
+    the role ("anon can execute trigger_auto_publish(text) at this boundary");
+  - a second test asserts the policy table covers every privileged function the
+    chain produces, so a function added later cannot escape the check;
+  - a third test proves the real callers still work (service_role can call
+    record_alert/newsroom_status, postgres can run the prunes, both public
+    roles can bump a view counter) and that anon/authenticated get "permission
+    denied" on newsroom_status() and trigger_auto_publish().
+aclexplode is used rather than has_function_privilege because postgres is the
+superuser in the harness and a superuser check would always say yes.
+
+Mutation evidence:
+  - reverting record_alert to `revoke ... from public`  -> 4 boundary failures
+    starting at 20261016090000 (anon + authenticated);
+  - reverting trigger_auto_publish to the same form    -> failures starting at
+    20261015120200, i.e. the window the review identified;
+  - both files restored (diff verified).
+
+Wording (review point 5)
+------------------------
+Corrected in this report (F4 section), in docs/OPERATIONS.md ("the eight gated
+jobs inactive and the six safe jobs active") and in the repo-integrity test
+name. The earlier commit message's line "every job in the initial chain is
+created with active := false" is inaccurate; only the eight gated jobs are.
+
+EVIDENCE AFTER THE FOLLOW-UP
+----------------------------
+npx vitest run src/test/phase6-sql.test.ts            -> 30 passed (3 new)
+npm run verify                                        -> 12 files / 221 tests
+npm run check:functions                               -> 13/13 entrypoints
+
+
+PHASE 0 — CORRECTIVE CHANGES (repository only, no deployment)
+=============================================================
+Date: 2026-10-17 | Branch: arena/e59698ee-latest-version-of-newssparkle
+Base commit: 435ffd3 (the audit). Scope: F1-F5 from that audit, nothing else.
+No Supabase CLI command, no database connection, no migration applied, no
+function deployed, no secret changed, no cron enabled, no publish, main
+untouched.
+
+F1 — THE GATE USED AN API THE PLATFORM FORBIDS
+----------------------------------------------
+Root cause: Supabase grants the `postgres` role SELECT only on cron.job
+(supabase/postgres 20231020085357 + the grant_pg_cron_access() event trigger),
+so `update cron.job set active = ...` fails with "permission denied for table
+job" — inside `db push` it would abort the migration at the gate and every
+activation step after it.
+
+Change: the canonical gate is now
+  select cron.alter_job(jobid, active => false)
+    from cron.job
+   where jobname in ('write-desk','publish-scheduler', …the same 8…);
+with the resume form `select cron.alter_job(jobid, active => true) from
+cron.job` and the same for "stop everything". It appears verbatim in
+20261016090100 §3b, 20261016090200, 20261017090000, the checklist (B2, G1-G3,
+section H) and docs/OPERATIONS.md — five copies, asserted identical.
+
+Why it is correct, from pg_cron 1.6.4 itself:
+  - cron.alter_job(job_id bigint, schedule text default null, command text
+    default null, database text default null, username text default null,
+    active boolean default null) returns void — pg_cron--1.3--1.4.sql, so the
+    function has existed since 1.4 and the signature above is the real one.
+  - AlterJob() builds a SET list only from the non-NULL arguments, so
+    `active => false` cannot touch schedule/command/database.
+  - it runs the UPDATE as the extension owner (SetUserIdAndSecContext), so
+    EXECUTE is sufficient; no table privilege is needed.
+  - for a non-superuser it filters `username = currentuser`; the jobs are
+    created by `postgres` (ScheduleCronJob takes the current user), and the
+    operator runs the SQL as `postgres`, so ownership holds.
+  - it calls InvalidateJobCache(), the same cache refresh the UPDATE relied on.
+
+Regression tests (src/test/phase6-sql.test.ts):
+  - "uses the gate API the platform actually permits, not a direct UPDATE":
+    a SELECT-only role is denied `update cron.job`; alter_job is SECURITY
+    DEFINER and executable by postgres; no migration may contain the UPDATE.
+  - "the gate changes only `active`, never a schedule or a command".
+  - "runs the gate on a project that has no jobs yet without failing".
+  - repo-integrity: "embeds the identical gate statement in every migration
+    and both operator documents" (5 files) and "never issues the UPDATE form
+    the platform rejects" (real statements only, prose is allowed).
+
+F2 — PUBLIC ROLES COULD EXECUTE THE PRIVILEGED FUNCTIONS
+--------------------------------------------------------
+Root cause: the migrations only did `revoke ... from public`, but Supabase
+grants EXECUTE to anon/authenticated/service_role at creation time
+(init-scripts/00000000000000-initial-schema.sql:41). The per-role grants
+survived, so the publishing triggers — and newsroom_trigger, which attaches the
+Vault secret — were callable with the public anon key.
+
+Change (new migration 20261017090000_phase6_privileges_and_gate_repair.sql):
+every public function is now revoked from public, anon, authenticated AND
+service_role by name, then granted only where it is genuinely needed:
+  anon, authenticated          increment_post_views (the view counter)
+  service_role                 record_alert, claim_ingested_items,
+                               category_published_count, newsroom_llm_calls_today,
+                               newsroom_status, prune_automation_tables,
+                               prune_post_view_events
+  postgres (pg_cron)           newsroom_trigger, trigger_auto_publish,
+                               trigger_breaking_news_monitor,
+                               trigger_notifications_dispatcher, the prunes
+  nobody                       touch_updated_at (trigger helper)
+service_role deliberately does NOT get the HTTP triggers: an edge function has
+no reason to make the database send a request carrying the automation secret.
+
+The harness now models the platform: SUPABASE_PRELUDE applies Supabase's four
+default-privilege statements, so the old design fails here (it did: the new
+tests were red until the migration was added) and any future function that
+forgets its revoke fails too.
+
+Applied at creation: the same least-privilege statements are also in every
+migration that creates one of these functions, so no intermediate `db push`
+boundary is exposed. See the review follow-up at the top of this report.
+
+Regression tests:
+  - "locks down the RPCs …" (11 signatures, anon+authenticated denied);
+  - "grants each privileged function only to the role that calls it";
+  - "has no SECURITY DEFINER function reachable by the public roles except the
+    view counter" (whole-catalog sweep).
+
+F3 — HARD-CODED OLD-PROJECT FALLBACK
+------------------------------------
+Change: newsroom_trigger no longer falls back to
+https://ruusbjlabbojpbawbphc.supabase.co. A missing or non-https
+newsroom_base_url raises "newsroom_base_url missing or invalid in Vault" and
+nothing is sent. The function name is also validated against a real allow-list
+(10 scheduled names) instead of being concatenated into the URL, so the claim
+in OPERATIONS.md is now true rather than aspirational.
+
+Regression tests:
+  - "fails closed when the newsroom base URL is missing or not https" (also
+    asserts no HTTP request is queued);
+  - "only forwards the function names on the allow-list" (rejects "../v1/admin",
+    "unknown-function", "sitemap"; accepts all ten scheduled targets);
+  - repo-integrity: the retired ref may not appear in the runtime files, and the
+    fail-closed message must exist in the cron migration.
+The two definitions of the function (cron migration + repair migration) are
+asserted identical by a body comparison in the test suite.
+
+F4 — JOBS BRIEFLY ACTIVE DURING THE PUSH
+----------------------------------------
+Root cause: `db push` applies one file per transaction (supabase/cli
+pkg/migration/apply.go), so 20260503120747 and 20261015120200 were live before
+the Phase 6 gate existed.
+
+Change: both files now create their jobs with
+cron.schedule_in_database(..., current_database(), active := false). The legacy
+auto-publish-every-4h, the three editions, breaking-news-monitor and
+notifications-dispatcher are never active at any intermediate state. Names,
+schedules and commands are unchanged.
+
+Wording check (review follow-up): only the EIGHT gated jobs are intentionally
+created inactive; the SIX safe jobs (ingest-feeds, trend-watch, phase6-monitor,
+validate-feeds-daily, prune-post-view-events, prune-automation) are active from
+the moment they are created, via cron.schedule(). Five of the eight gated jobs
+are first created in 20261015120200 (the three editions, breaking-news-monitor,
+notifications-dispatcher) and three in 20261016090100 (write-desk,
+publish-scheduler, newsroom-maintenance). The legacy auto-publish-every-4h in
+20260503120747 is created inactive too and is retired by the Phase 6 migration.
+An earlier one-line report said "every job in the initial chain is born
+inactive"; that was shorthand and wrong, and the repo-integrity test title that
+repeated it has been corrected.
+
+Regression tests:
+  - "never leaves a publishing-capable job active at any point in the chain":
+    re-runs the whole chain file by file and inspects cron.job after EVERY file;
+  - repo-integrity: "creates every gated job through `schedule_in_database`,
+    never `cron.schedule()`" (no cron.schedule() for a non-safe name anywhere);
+  - mutation-checked: flipping one `active := false` to `true` fails the runtime
+    test with the exact file name.
+
+F5 — DOCUMENTATION AND .env
+---------------------------
+Corrected:
+  - checklist: `.env` IS TRACKED (it is not gitignored) — stated plainly, with
+    what it contains;
+  - checklist: "the repo's only project ref" was false (three refs exist) —
+    rewritten to name all three and their roles;
+  - checklist/OPERATIONS: newsroom_base_url is REQUIRED, not "a convenience";
+  - OPERATIONS: the allow-list claim is now true (F3) and says how it works;
+  - both docs: 13 -> 14 migrations; 19 -> 30 tests;
+  - both docs: Vault step moved before `db push` (C1-C3 -> B1) and the
+    execution order is stated at the top of section B;
+  - docs/ci-workflow.pending.yml: the CI fallback URL was the old project.
+.env determination (no value printed):
+  - tracked by git (`git ls-files .env`), not ignored;
+  - three keys: VITE_SUPABASE_PROJECT_ID, VITE_SUPABASE_URL,
+    VITE_SUPABASE_PUBLISHABLE_KEY;
+  - the key is a 208-char legacy JWT whose only claims are iss=supabase,
+    ref=ruusbjlabbojpbawbphc, role=anon — an anon/publishable key for the OLD
+    project, public by design, NOT a service_role key;
+  - no AI, Vault, automation or service-role secret is present.
+  Left as-is deliberately: updating it is the Phase 5 cutover, and removing it
+  from git changes the local build workflow. Both need separate approval.
+
+OUT-OF-SCOPE REPAIR (necessary to obtain a green verify)
+---------------------------------------------------------
+src/test/phase6-orchestration.test.ts carried a time bomb, present at 435ffd3
+and unrelated to F1-F5: NOW was pinned to 2026-10-16T13:00Z while the fixtures
+built their timestamps from the real clock and TRENDS_XML/disabled_until had
+hard-coded 2026-10-16 dates. From 2026-10-17 four tests failed for everyone
+(3 publish-scheduler, 1 trend-watch), and pinning NOW to "today" surfaced two
+more. Fixed by deriving all three from the same run-time clock. Verified: the
+same four tests fail at 435ffd3 and all 31 pass here. No production code
+touched.
+
+FILES CHANGED
+-------------
+supabase/migrations/20261017090000_phase6_privileges_and_gate_repair.sql  NEW
+supabase/migrations/20261016090100_phase6_autonomy_crons.sql   gate + trigger
+supabase/migrations/20261016090200_phase6_activation_gate.sql  gate
+supabase/migrations/20261015120200_reschedule_auto_publish_18_per_day.sql  F4
+supabase/migrations/20260503120747_10533559-…-8078a344b3f7.sql  F4
+src/test/harness/cron-contract.ts            gate, rationale, extractor
+src/test/harness/sql-staging.ts              platform ACLs + faithful alter_job
+src/test/phase6-sql.test.ts                  +8 tests Phase 0, +3 follow-up (30)
+src/test/repo-integrity.test.ts              +3 tests (30 total)
+src/test/phase6-orchestration.test.ts        time bomb (out of scope, above)
+phase6_activation_checklist.txt              F1/F3/F5 + counts
+docs/OPERATIONS.md                           F1/F3/F5 + counts
+phase6_summary.txt, phase6_1_summary.txt     F3 wording, counts, this section
+docs/ci-workflow.pending.yml                 CI fallback URL
+
+EVIDENCE (commands run here, all local)
+---------------------------------------
+npm run verify               -> exit 0; 12 test files / 218 tests; build OK
+npm run check:functions      -> exit 0; 13/13 entrypoints, deno 2.9.6
+npx vitest run src/test/phase6-sql.test.ts          -> 30 passed
+npx vitest run src/test/repo-integrity.test.ts      -> 30 passed
+npx vitest run src/test/phase6-orchestration.test.ts-> 31 passed
+Mutation checks (reverted immediately):
+  gate UPDATE restored in a migration     -> 2 repo-integrity tests fail
+  legacy job created active               -> F4 runtime test fails, names the file
+  security-definer revoke removed         -> F2 tests fail (they did, before the fix)
+
+NOT VERIFIED — assumptions that only a live project can settle
+--------------------------------------------------------------
+- That Supabase grants EXECUTE on cron.alter_job to `postgres` on the target
+  project. The platform source says `grant all on all functions in schema cron
+  to postgres with grant option` runs when pg_cron is created; the target's
+  pg_cron version and ACLs were not read (no egress, no credentials).
+- That pg_cron on the target is >= 1.4 (needed by both schedule_in_database and
+  alter_job). PostgreSQL 17.11 implies a current image, but `extversion` was
+  not queried.
+- The real effect of the 14 migrations on the target database: nothing was
+  applied. The harness is PostgreSQL 18.6 + stubs, not the project.
+- The .env / config.toml values still point at the old project by design.
+
+PHASE 6.1 CORRECTION - FAIL-CLOSED CRON GATE (targeted safety fix)
+====================================================================
+Date: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
+Audited commit: 9cd5cc0. Base commit for this correction: 9cd5cc0.
+Scope: the four defects found while auditing the activation procedure, and
+nothing else. No deployment, no production SQL, no credential change, no new
+feature, main untouched.
+
+WHAT WAS WRONG AT 9cd5cc0
+-------------------------
+1. RACE: the cron migration created all 14 jobs ACTIVE, so `supabase db push`
+   started publishing immediately. The documented safety barrier was a manual
+   pause AFTER the push - a window in which publish-scheduler (*/10) or
+   auto-publish-midday could publish, and newsroom-maintenance (40 * * * *)
+   could archive, before any operator looked. A pause that must win a race is
+   not a safety barrier.
+2. MISMATCH: the checklist paused seven jobs (including
+   notifications-dispatcher), the test suite tested six, and docs/OPERATIONS.md
+   still listed the old Phase 5 set of five. Three different "safe job sets".
+3. ORDERING: newsroom-maintenance was paused only as a side effect of a
+   blanket update and had no separate approval step, yet it is the one job that
+   changes pages readers can already see (archives >730-day, <50-view posts).
+4. COVERAGE: no test asserted that the jobs are inactive immediately after a
+   fresh migration, or after a migration re-run.
+
+THE FIX (smallest fail-closed design: the row is born inactive)
+--------------------------------------------------------------
+The eight jobs that can publish, spend LLM budget, alert readers or archive
+published content are now created INACTIVE by the migration itself:
+
+  select cron.schedule_in_database('<name>', '<schedule>',
+         $$ <same command as before> $$, current_database(), active := false);
+
+cron.schedule_in_database(name, schedule, command, database, username default
+null, active default 'true') exists from pg_cron 1.4 and is the ONLY SQL entry
+point that can create an inactive job: cron.schedule's three-argument form
+passes NULL `active`, which pg_cron reads as true (verified in the pg_cron
+sources, cron_schedule_named -> ScheduleCronJob, v1.4.0 ... v1.6.4).
+The six safe jobs (ingestion, trends, monitor, feed validation, both prunes)
+keep cron.schedule, so monitoring and ingestion are not silently disabled.
+
+Gated  = created INACTIVE (8): write-desk, publish-scheduler,
+         auto-publish-morning, auto-publish-midday, auto-publish-evening,
+         breaking-news-monitor, notifications-dispatcher, newsroom-maintenance
+Safe   = created ACTIVE   (6): ingest-feeds, trend-watch, phase6-monitor,
+         validate-feeds-daily, prune-post-view-events, prune-automation
+All 14 schedules and commands are unchanged.
+
+One canonical gate statement (asserted by test). SUPERSEDED BY THE PHASE 0
+CORRECTION BELOW: this section records the 6.1 text, which used a direct
+`update cron.job`; that form does not work on Supabase and has been replaced by
+`select cron.alter_job(jobid, active => false)` everywhere. Shown here only so
+the history is readable:
+  update cron.job set active = false
+   where jobname in ('write-desk','publish-scheduler',
+                     'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor','notifications-dispatcher',
+                     'newsroom-maintenance');
+It lives in migration 20261016090100 section 3b, in the new repair migration
+20261016090200_phase6_activation_gate.sql, in phase6_activation_checklist.txt
+(B2, expanded in section H) and in docs/OPERATIONS.md.
+
+FRESH INSTALL vs RE-RUN (the two behaviours the audit asked for)
+---------------------------------------------------------------
+FRESH INSTALL (`db push` on a project that never ran Phase 6): no window. The
+  gated rows are inserted inactive in the same statement that creates them, so
+  no publishing-capable job and no maintenance job can tick before preflight.
+  Only ingestion, trends, the monitor and the prunes run: they add candidates
+  and alerts and delete nothing published. Verified on the migration text and
+  by executing it in the staging harness (tests below).
+MIGRATION RE-RUN / db reset on an ALREADY-ACTIVATED project: safe and
+  repeatable. The recreate path unschedules the 14 names first, then
+  re-creates them; the upsert is
+  `on conflict on constraint jobname_username_uniq do update set schedule,
+  command, database` - it never touches `active` - and the gate
+  `update ... set active = false` runs again at the end. Net effect: back to
+  8 inactive / 6 active. Verified: the suite enables every job, re-applies the
+  migration, and asserts 8/6 again.
+OPERATOR ACTIVATION (the only way jobs switch on): three documented steps, in
+  order, in the checklist. G1 write-desk + publish-scheduler; G2 (after 24h)
+  the three editions + breaking-news-monitor + notifications-dispatcher; G3
+  newsroom-maintenance ONLY after the B3 archive pre-check has been read and
+  approved. G3 is deliberately separate: an operator who has not reviewed the
+  730-day/50-view rows never has to authorise archiving, and leaving the job
+  inactive breaks nothing else. The test reads these exact statements out of
+  the checklist file and runs them, so the doc and the tested behaviour cannot
+  drift apart.
+
+MIGRATION COUNT: 14 files in supabase/migrations/ after the Phase 0 correction
+(20261016090200 was added by the 6.1 gate correction, 20261017090000 by the
+Phase 0 privilege/gate repair; the original 6.1 audit ran against 12). Verified
+by the suite: it applies every file it finds and asserts the number of runs
+equals the number of files.
+
+FILES CHANGED IN THIS CORRECTION
+--------------------------------
+supabase/migrations/20261016090100_phase6_autonomy_crons.sql  (patched)
+   header now documents the gate; 8 gated jobs created via
+   cron.schedule_in_database(..., active := false); section 3b holds the
+   canonical gate statement; verification comment updated to 8 inactive / 6
+   active of 14. Schedules and commands unchanged.
+supabase/migrations/20261016090200_phase6_activation_gate.sql  (new)
+   idempotent repair migration: the same gate statement for projects already
+   pushed before this fix. Re-runnable; touches nothing else.
+src/test/harness/cron-contract.ts  (new)
+   the single source of truth: 14 jobs (name/schedule/verbatim command/
+   category), the 8/6 split, GATE_SQL, ACTIVATION_STEPS, and the parsers the
+   docs are tested with.
+src/test/harness/sql-staging.ts  (patched)
+   cron.schedule_in_database stub with the real signature and semantics
+   (inserts active=false; conflict update leaves `active` alone; jobname unique
+   per (jobname, username) as in 1.2+), plus NULL jobname in the 2-arg
+   cron.schedule, so the harness reproduces the platform behaviour the fix
+   depends on.
+src/test/phase6-sql.test.ts  (patched)
+   19 tests (was 14): 7 assert the gate - exact schedules, inactive/active
+   immediately after migration, still 8/6 after a re-run, still 8/6 after the
+   operator activates everything and the migration is re-applied, only the
+   documented steps open it (parsed out of the checklist), the gate statement
+   and the resume/stop statements stay reversible, and the retired Phase 5
+   names do not come back.
+src/test/repo-integrity.test.ts  (patched)
+   +5 tests: the gate statement is byte-identical (whitespace-normalised) in
+   the migration, the repair migration, the checklist and OPERATIONS.md; every
+   `active = false` statement in the docs names exactly the gated set; both
+   docs state the same "8 of 14 jobs inactive (gated) / 6 active (safe)";
+   the migration creates exactly the 8 via schedule_in_database and never
+   `set active = true`; the retired wording is gone.
+phase6_activation_checklist.txt  (rewritten sections A2/B1/B2/B3/G/H)
+   eight-job gate with the canonical statement, the four job classes spelled
+   out (publishing-capable / content generation / reader-alert / destructive
+   maintenance / safe-operational), the "8 of 14 inactive / 6 active"
+   expectation, G1/G2/G3 with maintenance ordered after the B3 pre-check, and
+   a section H that is triggerable and reversible.
+docs/OPERATIONS.md  (section 3 + activation block)
+   "Created as" column for all 14 jobs, the fresh-install-fails-closed
+   explanation, the canonical gate SQL in Pause and resume, and G3 as a
+   separate maintenance approval.
+
+DOC-ONLY CORRECTION (migration count + pg_cron version caveat)
+--------------------------------------------------------------
+A follow-up documentation correction on the same branch, still no deployment.
+It changes no behaviour, and every number below was re-measured at this commit.
+
+1. MIGRATION COUNT was stale in five places. supabase/migrations/ holds 13 .sql
+   files here - the 6.1 audit above ran against the 12-file chain, and the
+   correction section added 20261016090200_phase6_activation_gate.sql.
+   Corrected:
+     phase6_activation_checklist.txt section 0 ("all migrations apply...") and
+       step B1 ("EXPECT ... migrations applied") now state the current count;
+     phase6_1_summary.txt section 2 (the live db push expectation) and the
+       final status line now state the current count.
+   Kept accurate and relabelled: the 6.1 evidence (12 files / 1087 lines, 14
+   tests) is marked PRE-CORRECTION / historical, because migration
+   20261016090200 did not exist in that run and no earlier result covers it.
+   The current numbers live in the correction section above and in the
+   checklist's section 0.
+2. pg_cron VERSION CAVEAT was overstated. The old text implied the repair
+   migration closes the gate for every installation regardless of version. The
+   two cases are now separated everywhere (checklist A2/B1/B2, OPERATIONS.md
+   section 3):
+     EXISTING project whose cron migration was already applied: the jobs exist,
+       so the repair migration and the gate UPDATE only flip `active` on rows
+       that already exist. Thin requirement: the cron.job table and its
+       `jobname` column (pg_cron 1.3+), which such a project already has,
+       because the jobs being gated were created through it.
+     FRESH INSTALL: migration 20261016090100 itself calls
+       cron.schedule_in_database (pg_cron 1.4+, 2021; Supabase ships 1.6.x). On
+       an older version that statement does not exist, `db push` fails there and
+       the repair migration never runs - it cannot rescue that case, and it
+       creates no rows. Remedy: have pg_cron >= 1.4 before the first push. The
+       checklist now makes the operator assert `select count(*) from cron.job;`
+       (expect 14) after B1 instead of assuming.
+3. INTEGRITY TESTS added (repo-integrity.test.ts), following the file's
+   existing read-from-disk convention:
+     - the migration count the docs promise equals the number of .sql files in
+       supabase/migrations/ (checklist section 0 + B1, summary db push + final
+       status), so a new migration cannot land with stale docs;
+     - the retired count claims are banned from both documents;
+     - the historical 6.1 figures must sit inside a paragraph marked historical;
+     - the repair migration contains no schedule_in_database and no
+       `set active = true` (it only updates existing rows), while the primary
+       migration does use schedule_in_database - the structural half of the
+       version split;
+     - all three operator documents state both installation cases and the 1.4
+       floor.
+   phase6-sql.test.ts: the idempotency test now re-applies all three Phase 6
+   migrations (it re-applied two) and asserts the gate stays at 6 active.
+   Mutation check: reverting B1 to the old figure fails 2 of the new tests.
+
+EVIDENCE - COMMANDS RUN (all local, all offline)
+------------------------------------------------
+npx vitest run src/test/phase6-sql.test.ts        -> 19 passed / 0 failed
+npx vitest run src/test/repo-integrity.test.ts    -> 23 passed / 0 failed
+npx vitest run src/test/phase6-orchestration.test.ts -> 31 passed (unchanged)
+npx vitest run src/test/phase6-secrets.test.ts    -> 10 passed (unchanged)
+npm run verify   (lint + tsc + vitest + build)    -> exit 0; 12 test files /
+                                                     207 tests passed (194
+                                                     before the corrections)
+npm run check:functions                           -> exit 0; 13/13 entrypoints
+                                                     type-check, deno 2.9.6
+Mutation checks (deliberate drift, then reverted) -> deleting
+  'newsroom-maintenance' from the OPERATIONS.md gate statement fails 2
+  repo-integrity tests; changing the checklist G1 statement to name only
+  write-desk fails the phase6-sql checklist-parity test; reverting the
+  checklist B1 count back to the old figure fails 2 of the count tests. The
+  guards
+  have teeth, they are not tautologies. All counts above were re-measured at
+  this commit, after the doc correction, in one final `npm run verify`.
+Staging-harness probe (PGlite, real PostgreSQL 18.6): schedule_in_database
+  with active := false inserts active=false; re-scheduling the same job name
+  updates schedule and leaves active untouched; the operator gate then flips
+  exactly the 8 documented names.
+
+WHAT THIS DOES NOT PROVE (honest limits)
+----------------------------------------
+NOT VERIFIED  The live project's cron.job table. Network egress to
+              *.supabase.co is unavailable in this environment and no
+              Supabase credential exists, so the current state of the live
+              pg_cron jobs is unknown - BLOCKED, not "fine".
+NOT VERIFIED  The deployed pg_cron version (extversion was never read: no
+              egress to *.supabase.co, no credentials). The correction makes it
+              load-bearing in two DIFFERENT ways that must not be conflated:
+              (a) EXISTING PROJECT whose cron migration was already applied:
+                  the jobs exist, so the repair migrations 20261016090200 and
+                  20261017090000 close the gate with cron.alter_job. No
+                  schedule_in_database is involved, and no UPDATE of cron.job
+                  either (the platform forbids it). The floor is pg_cron 1.4,
+                  the same as the fresh-install path.
+              (b) FRESH INSTALL: the cron migration 20261016090100 creates the
+                  eight gated jobs with cron.schedule_in_database(..., active :=
+                  false), which exists from pg_cron 1.4 (2021; Supabase ships
+                  1.6.x today). On an older pg_cron that statement does not
+                  exist and `db push` FAILS there. The repair migration cannot
+                  rescue this case: it never runs (the push stops at the
+                  failing migration) and it creates no rows. The remedy is to
+                  make pg_cron >= 1.4 available before the first push, not to
+                  hand-create jobs.
+              Fail-closed reading of (b): a fresh install on an older pg_cron
+              ends with 0 Phase 6 cron jobs - nothing publishes (safe), but
+              ingestion, trends and the monitor are not running either, so it
+              needs the operator to notice. The checklist makes that an explicit
+              check (`select count(*) from cron.job;` expect 14 after B1).
+NOT VERIFIED  pg_cron's clock and the statement-level trigger firing in
+              production: the harness reproduces the schema and the upsert
+              semantics, not the scheduler thread.
+NOT VERIFIED  pg_cron's `cron.schedule` set-returning usage (only its source
+              and schema were read).
+The 5 live items listed in section 2 of this file are unchanged and still
+BLOCKED.
+
+PHASE 6.1 - LIVE DEPLOYMENT / INTEGRATION VERIFICATION
+=======================================================
+Date: 2026-10-15 | Branch: arena/e59698ee-latest-version-of-newssparkle
+Base commit: 65a65bd (Phase 6) + the changes in section 10.
+Scope: verify what can be verified with real engines, fix what breaks, and
+write down exactly what still needs the live Supabase project.
+
+METHOD (and what "verified" means here)
+---------------------------------------
+This environment has no Supabase credentials, no database and no network egress
+(every *.supabase.co call fails to connect; no SUPABASE_* variable is set), so
+nothing below claims a dashboard result. Instead the two things that decide
+whether Phase 6 works were executed with real engines:
+
+ 1. THE MIGRATIONS, replayed in filename order against real PostgreSQL 18.6
+    (the PostgreSQL source compiled to WASM by PGlite 0.5.10). The
+    platform-only building blocks (pg_cron, pg_net, Vault, auth, the
+    anon/authenticated/service_role roles, the realtime publication) come from
+    a stub prelude that mirrors their documented behaviour.
+    src/test/phase6-sql.test.ts (14 tests) + src/test/harness/sql-staging.ts.
+ 2. THE FUNCTIONS, type-checked by the real Deno runtime (deno 2.9.6 /
+    V8 15.0.245.2 / TypeScript 6.0.3) - the runtime Supabase uses.
+    `npm run check:functions` (scripts/check-functions.mjs, 13 entrypoints).
+
+1. PASS - VERIFIED HERE  (historical: measured during the 6.1 audit at 9cd5cc0)
+-----------------------
+THIS SECTION IS PRE-CORRECTION EVIDENCE. It was measured before the fail-closed
+cron-gate correction (commit 822d9d7) and is left exactly as measured; it must
+not be read as covering that correction. The two numbers that changed: the
+migration chain is 13 files now, not 12, and src/test/phase6-sql.test.ts holds
+19 tests, not 14. The current, re-verified numbers are in the correction section
+at the top of this file and in phase6_activation_checklist.txt section 0.
+PASS  Migration chain applies cleanly: 12 files / 1087 lines, no errors.
+      (historical - the chain is 13 files since 20261016090200 was added; that
+      13-file chain was verified separately, see the correction section.)
+      Only 3 statements were substituted - the `create extension if not exists`
+      lines for pg_cron + pg_net (20260503120214_...) and pgcrypto
+      (20261016090000_phase6_autonomy_schema.sql). Everything else ran as
+      written, including the older
+      `alter publication supabase_realtime add table public.notifications`.
+PASS  Phase 6 migrations are re-runnable: re-applying them keeps 24 sources,
+      14 jobs, no duplicate rows, no errors. (historical: two files at the time
+      of that run; all three Phase 6 migrations are re-applied and asserted
+      today.)
+PASS  Schema: 6 automation tables, all 17 new posts columns, all 13 indexes;
+      posts status accepts draft/review/scheduled/published/rejected/archived
+      and rejects anything else; ingested fingerprints are unique; record_alert
+      upserts one row per code/day and increments occurrences.
+PASS  RLS: enabled on every automation table, and anon/authenticated hold no
+      SELECT or INSERT on any of them. The public posts policy still requires
+      status='published' and anon cannot INSERT.
+PASS  RPCs: all 7 service-role functions are SECURITY DEFINER with a pinned
+      search_path and are not executable by anon/authenticated.
+      claim_ingested_items() serves the highest trust tier first, skips expired
+      rows and rows inside retry backoff, and never hands the same row out
+      twice (two overlapping calls claimed 2 rows, then only the untouched
+      candidate). prune_automation_tables() deletes only past-retention rows.
+      newsroom_status / newsroom_llm_calls_today / category_published_count
+      return the documented shapes and numbers.
+PASS  Cron: exactly the 14 intended jobs, once each, with the exact
+      command and timeout from the migration (string-equal after whitespace
+      normalisation), and with the intended active state: 8 inactive / 6
+      active - including the 3 editions, the 4 Phase 5 jobs routed
+      through their helpers, and both prunes. The retired Phase 5 job names do
+      not reappear.
+PASS  Vault -> trigger -> function: posts to
+      <newsroom_base_url>/functions/v1/<function> with
+      `Authorization: Bearer <auto_publish_secret>`, the JSON body, and the
+      row's timeout (120/300/90/240/180/60s). The secret comes from
+      vault.decrypted_secrets, never from a URL, and is in no repository file.
+      A missing secret still sends the request (empty bearer + warning) instead
+      of breaking the job; a custom newsroom_base_url is honoured.
+PASS  Deno: 13/13 entrypoints pass `deno check` (strict). This FAILED before
+      the fix in section 4.
+PASS  Alignment: every function directory is declared in supabase/config.toml;
+      the 10 write-capable endpoints call requireSecret(); the 3 public feeds
+      (sitemap, news-sitemap, rss) do not; every relative import resolves; no
+      function references a browser-only global (all undefined in Deno);
+      cron -> function -> config.toml is asserted end to end.
+PASS  Secrets wiring: every env var the functions read is documented in
+      .env.example (3 gaps found and fixed), the Vault names the SQL reads are
+      the names the operator is told to create, auth.ts accepts exactly what
+      the trigger sends, and no live credential is committed (JWT/sk- scan;
+      the one legacy migration with an embedded anon JWT is whitelisted and
+      must be rotated - OPERATIONS.md section 2).
+PASS  Limits are the documented ones: 18 posts/UTC day, 5 per section, 25-min
+      minimum gap, 2 per run, 180-min catch-up, 12-h lookahead, editions
+      5+6+7=18, publish >=75 / review >=55, duplicate thresholds
+      0.72/0.55/0.38/0.2, LLM budget 220 calls/day checked before the desk
+      spends.
+PASS  Pipeline behaviour offline (fake DB/AI/HTTP): 192 tests / 12 test files pass.
+      All six orchestrators are covered end to end - ingest (validation,
+      dedupe, corroboration, source health, cooldown, garbage feeds), write
+      desk (write -> verify -> score -> schedule/review/reject, unparseable
+      output, duplicate skip, budget stop, no-key stop, 3-attempt give-up),
+      scheduler (burst, gap, daily cap, overdue rebalance, failure alert),
+      trends (scoring, gap notes, covered-topic suppression, outage), 
+      maintenance (image repair, stale archive, broken links, endpoints) and
+      the monitor (stale-publishing escalation, quiet when healthy).
+
+2. BLOCKED - NEEDS THE LIVE PROJECT
+-----------------------------------
+Each item names the command and the expected result, so it is a checklist.
+
+BLOCKED  Apply migrations: `supabase link --project-ref xuqxautmflofkvbsaanh`
+         + `supabase db push` -> 14 migrations, 0 errors (the repository holds
+         14 .sql files in supabase/migrations/; the last two are no-ops on a
+         fresh install). BOTH install paths need pg_cron >= 1.4:
+         cron.schedule_in_database for the gated jobs and cron.alter_job for
+         the gate (see the version caveat below).
+         Then
+         `select jobname, schedule, active from cron.job order by 1;`
+         -> 14 rows: 8 inactive (write-desk, publish-scheduler,
+         auto-publish-*, breaking-news-monitor, notifications-dispatcher,
+         newsroom-maintenance) and 6 active (ingest-feeds, trend-watch,
+         phase6-monitor, validate-feeds-daily, prune-post-view-events,
+         prune-automation). Nothing publishes until the operator runs the
+         documented G1-G3 steps (see the correction section above).
+BLOCKED  Deploy functions:
+         `supabase functions deploy ingest-feeds write-desk publish-scheduler
+          trend-watch maintenance phase6-monitor auto-publish`
+         (plus breaking-news-monitor, notifications-dispatcher,
+          validate-feeds, sitemap, news-sitemap, rss) -> 13 deployments.
+BLOCKED  Create secrets: vault.create_secret('<32-byte hex>',
+         'auto_publish_secret', ...) + vault.create_secret(<project url>,
+         'newsroom_base_url', ...) + `supabase secrets set
+         AUTO_PUBLISH_SECRET=<same value>`. Expect no "missing from Vault"
+         warning and no 401 in net._http_response.
+BLOCKED  Controlled live end-to-end (publishing jobs paused):
+         (audited and corrected in phase6_activation_checklist.txt — the
+          scheduler call in step 4 does NOT publish immediately, because the
+          desk schedules a story one minimum gap or more into the future)
+           1. POST ingest-feeds {"maxSources":3} -> ok:true, candidates added,
+              a pipeline_runs row written
+           2. select count(*) from ingested_items where status='new';
+           3. POST write-desk {"limit":1} -> a post with status scheduled or
+              review - never published
+           4. POST publish-scheduler {"limit":1} -> exactly one post published,
+              live on the site, in the sitemap/RSS within the hour
+           5. POST phase6-monitor -> 200, ok:true, no problems listed
+         This is the only test that exercises pg_net, real Vault, the real
+         feeds, the real model and PostgREST together.
+BLOCKED  Live feed reachability: publishers block cloud IP ranges and Google
+         rate-limits by IP; only a live ingest run proves the 24 seeded feeds
+         answer from Supabase's network.
+BLOCKED  Real model quality: the tests prove the gates catch bad output, not
+         that the configured model writes well.
+
+3. NOT TESTED (and why)
+-----------------------
+NOT TESTED  A full publishing day (needs 24h of live cron). Caps and spacing
+            are unit-tested; the calendar is not.
+NOT TESTED  Google indexing of the refreshed sitemaps (needs crawl data).
+NOT TESTED  Storage growth over months - retention rules are asserted in SQL
+            (36h candidates + 7d grace, 30d runs/health, 60d alerts, 90d view
+            events), not observed over time.
+NOT TESTED  pg_cron actually ticking at :05/:35 etc. (platform extension; the
+            prelude reproduces its upsert/unschedule semantics, not its clock).
+
+4. BUGS FOUND AND FIXED IN 6.1
+------------------------------
+FIXED  breaking-news-monitor was dead in production, silently (highest impact
+       find). It parsed feeds with `new DOMParser()`, but Deno does not define
+       DOMParser (`typeof DOMParser` = "undefined" on deno 2.9.6, verified on
+       the real runtime). Every run threw a ReferenceError that the surrounding
+       try/catch swallowed, so the monitor reported "No new breaking item
+       found" forever while thinking all three feeds were empty. Repointed to
+       the shared regex-based parseFeedXml() that ingest-feeds uses and that is
+       already tested for RSS, Atom and garbage input. New guard:
+       repo-integrity fails if any edge function references a browser-only
+       global. This survived CI because CI never ran Deno.
+FIXED  Undocumented secrets the code reads: CRON_SECRET, AUTO_PUBLISH_URL
+       (both used by breaking-news-monitor) - now in .env.example, together
+       with the second Vault name newsroom_base_url (was in neither doc).
+FIXED  .env.example advertised GNEWS/NEWSAPI/SERPAPI keys as optional sources
+       although Phase 6 reads sources from content_sources; relabelled legacy
+       so an operator does not configure and pay for dead keys.
+FIXED  Removed SIMHASH_PREFILTER_BITS, a constant that implied a database
+       prefilter nobody implemented (the archive comparison runs the exact
+       4-shingle Jaccard over the last 7 days / 80 posts).
+FIXED  docs/OPERATIONS.md said "deploys all seven" (there are 13) and its pause
+       recipe covered only the 5 Phase 5 jobs.
+NEW    Safe first-activation procedure (pause/publish/resume, ordered smoke
+       test, stop conditions) in OPERATIONS.md.
+
+5. COST AND RESOURCE ESTIMATE (after activation)
+------------------------------------------------
+Invocations ~542/day (ingest 72, publish-scheduler 144, write-desk 48,
+breaking-news 48, notifications 144, monitor 48, maintenance 24, trends 8,
+editions 3, validate 1, prunes 2) = ~16k/month.
+Feeds: 72 runs x 24 sources = 1728 GETs/day at 40-80 KB, nothing stored beyond
+       candidates that pass validation.
+LLM: 2-4 calls per published story; the cap is 18 stories/day, so ~36-72
+     calls/day typical against a hard 220/day budget the desk checks first.
+     At gpt-4o-mini rates that is roughly $0.30-0.60/day worst case.
+Images: <=36 provider calls/day (Unsplash/Pexels free tiers allow 50/hour);
+        picsum fallback is free.
+Database: ~150-400 new candidates/day, ~542 run rows/day, ~24 health checks/day
+          - steady state tens of MB, inside current Supabase tiers.
+Headroom: publishing is capped at 18/day while the queue fills with hundreds of
+          candidates, so the system idles cheaply instead of overspending.
+
+6. SAFE ACTIVATION (order matters)
+----------------------------------
+SUPERSEDED IN PLACE - the migration no longer creates the jobs active. The
+corrected procedure is the correction section at the top of this file and
+phase6_activation_checklist.txt. In short:
+ 1. `supabase db push`. The gate is already closed by the migration; run the
+    canonical gate `update` anyway (B2) to prove it, and to repair a project
+    migrated before the fix. Expect 8 inactive / 6 active.
+ 2. Set the secrets (Vault + function env, identical value).
+ 3. Deploy functions; confirm an unauthenticated POST returns 401.
+ 4. Manual dry run, one stage at a time (section 2) - publishing jobs are still
+    inactive, so nothing can go live behind you.
+ 5. G1: enable write-desk + publish-scheduler. Watch 24h.
+ 6. G2: enable the three editions, breaking-news-monitor and
+    notifications-dispatcher.
+ 7. G3 (separate decision): read the B3 archive pre-check, then enable
+    newsroom-maintenance - or leave it inactive indefinitely.
+Stop conditions: monitor ok:false, nothing written in 12h, or any post that
+reads wrong -> close the gate with the B2 statement, fix, repeat steps 4-6.
+
+7. EMERGENCY STOP
+-----------------
+  select cron.alter_job(jobid, active => false)              -- the canonical gate
+    from cron.job
+   where jobname in ('write-desk','publish-scheduler',
+                     'auto-publish-morning','auto-publish-midday','auto-publish-evening',
+                     'breaking-news-monitor','notifications-dispatcher',
+                     'newsroom-maintenance');
+  select cron.alter_job(jobid, active => false) from cron.job;  -- stop everything
+  update public.content_sources set active = false;          -- stop one/all feeds
+Nothing is deleted: scheduled posts stay scheduled and resume when the jobs are
+re-enabled. See section H of phase6_activation_checklist.txt.
+
+8. FINAL STATUS PER DELIVERABLE
+-------------------------------
+ 1 automation audit / readiness ............. PASS
+ 2 content ingestion ........................ PASS offline / BLOCKED live feeds
+ 3 AI rewrite pipeline ...................... PASS offline / BLOCKED live model
+ 4 category assignment ...................... PASS
+ 5 SEO generation ........................... PASS
+ 6 featured-image automation ................ PASS / BLOCKED provider calls
+ 7 quality scoring .......................... PASS
+ 8 duplicate detection ...................... PASS
+ 9 scheduling engine ........................ PASS (24h cadence NOT TESTED)
+10 failure recovery ......................... PASS
+11 trend detection .......................... PASS offline / BLOCKED live API
+12 autonomous maintenance ................... PASS
+13 safety & trust gates ..................... PASS
+14 resource efficiency ...................... PASS (estimates; real spend NOT
+                                              TESTED until live)
+15 final verification of every subsystem .... PASS for 13/13 functions and
+                                              14/14 migrations; 6 live items
+                                              BLOCKED
+16 phase6_summary.txt ....................... PASS (already delivered)
+   deploy the 7 functions ................... BLOCKED (no CLI credentials/egress)
+   cron execution on the platform ........... BLOCKED (pg_cron ticks live only)
+   secrets present in Vault ................. BLOCKED (cannot read the project)
+
+Nothing was activated: recurring production publishing stays OFF until the
+section 2 items pass.
+
+9. AUTONOMY AFTER ACTIVATION
+----------------------------
+Unchanged from the Phase 6 estimate: ~90-95% of the publishing cycle runs
+without a human. Automated: sourcing, validation, rewriting, verification,
+scoring, dedupe, SEO, images, scheduling, publishing, monitoring, recovery,
+maintenance, retention. Human: the review lane (1-3 drafts/day expected), key
+rotation, and acting on alerts.
+
+10. FILES CHANGED IN 6.1
+------------------------
+src/test/harness/sql-staging.ts     new - PGlite staging harness
+src/test/phase6-sql.test.ts         new - 14 migration/schema/RPC/cron tests
+src/test/phase6-secrets.test.ts     new - 10 secret/cost/hygiene tests
+scripts/check-functions.mjs         new - `deno check` for every entrypoint
+src/test/repo-integrity.test.ts     +2 tests (browser globals, import graph)
+src/test/setup.ts                   jsdom shims guarded for node-env tests
+supabase/functions/breaking-news-monitor/index.ts   DOMParser -> parseFeedXml
+supabase/functions/_shared/dedupe.ts                remove unused constant
+package.json                        pglite devDependency + check:functions
+--- added by the fail-closed cron-gate correction (see the section above) ----
+supabase/migrations/20261016090100_phase6_autonomy_crons.sql   gate + inactive
+supabase/migrations/20261016090200_phase6_activation_gate.sql  new (repair)
+src/test/harness/cron-contract.ts                             new (contract)
+src/test/harness/sql-staging.ts                               schedule_in_database
+src/test/phase6-sql.test.ts                                   +5 cron gate tests
+src/test/repo-integrity.test.ts                               +5 cross-file tests
+phase6_activation_checklist.txt                               A2/B1/B2/B3/G/H
+docs/OPERATIONS.md                                            section 3 + ramp-up
+.env.example, README.md, docs/OPERATIONS.md   secrets, activation, tooling
+
+11. REMAINING RISKS
+-------------------
+- The first live ingest run is the first time the 24 seeded feeds are fetched
+  from Supabase's network; expect a few to need replacing.
+- Model quality is the largest uncontrollable variable; the review lane (55-74)
+  is the mitigation and needs a human to stay one.
+- The legacy anon JWT in the first migration is still in git history: rotate it
+  (OPERATIONS.md section 2).
+- auto_publish_secret must match between Vault and the function environment; a
+  mismatch fails closed (401) but publishes nothing.
+
+12. REPOSITORY STATE
+--------------------
+Everything above is committed and pushed to
+arena/e59698ee-latest-version-of-newssparkle.
+
+One file is deliberately NOT in the commit: .github/workflows/ci.yml. The GitHub
+App installation used to push this repository does not hold the `workflows`
+permission, and GitHub rejects any push whose commits create, edit or delete a
+file under .github/workflows ("refusing to allow a GitHub App to create or
+update workflow ... without `workflows` permission"). Pushing the workflow file
+and pushing the code cannot happen in the same commit - GitHub rejects the
+whole ref update.
+
+Resolution: the workflow definition is preserved in the repository as
+docs/ci-workflow.pending.yml, with instructions in its header and in README.md.
+It needs one commit by a token that holds the `workflows` scope (the GitHub web
+UI or a reconnect with that permission works). Until then `npm run verify` is
+the same gate, run locally, and it passes.
+
+The pre-existing .github/workflows/npm-publish-github-packages.yml is left
+untouched for the same reason.

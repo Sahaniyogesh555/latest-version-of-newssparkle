@@ -98,8 +98,8 @@ export default function Privacy() {
               <h3 className="font-serif text-xl font-bold text-headline mb-3">2. Information We Collect</h3>
               <h4 className="font-serif text-lg font-semibold text-headline mb-2">2.1 Information you provide</h4>
               <ul className="list-disc pl-6 space-y-1">
-                <li><strong>Contact form data</strong> — name, email address and the content of your message when you contact us.</li>
-                <li><strong>Newsletter / subscription data</strong> — email address if you sign up for updates.</li>
+                <li><strong>Contact drafts</strong> — the contact form prepares an email draft on your device. The website does not submit or store the form. Your email provider handles delivery if you choose to send it.</li>
+                <li><strong>Email subscriptions</strong> — newsletter signup is not currently available; the website does not collect newsletter email addresses.</li>
                 <li><strong>Correspondence</strong> — any information you send us by email.</li>
               </ul>
 

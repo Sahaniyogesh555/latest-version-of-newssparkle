@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 interface Heading {
@@ -8,13 +8,14 @@ interface Heading {
 }
 
 export function TableOfContents() {
+  const navId = useId();
   const [headings, setHeadings] = useState<Heading[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [activeId, setActiveId] = useState("");
 
   useEffect(() => {
     // Extract headings from article
-    const article = document.querySelector("article");
+    const article = document.querySelector('section[aria-label="Article body"]');
     if (!article) return;
 
     const headingElements = article.querySelectorAll("h2, h3");
@@ -27,6 +28,7 @@ export function TableOfContents() {
         id = `heading-${idx}`;
         el.id = id;
       }
+      el.setAttribute("tabindex", "-1");
       extracted.push({
         level,
         text: el.textContent || "",
@@ -71,6 +73,9 @@ export function TableOfContents() {
   return (
     <aside className="lg:sticky lg:top-24 bg-card border border-border rounded-lg p-4 sm:p-5 max-h-[calc(100vh-120px)] overflow-y-auto">
       <button
+        type="button"
+        aria-expanded={isOpen}
+        aria-controls={navId}
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center justify-between w-full text-left font-semibold text-headline hover:text-primary transition-colors"
       >
@@ -83,7 +88,7 @@ export function TableOfContents() {
       </button>
 
       {isOpen && (
-        <nav className="mt-4 space-y-2 text-sm">
+        <nav id={navId} aria-label="Article contents" className="mt-4 space-y-2 text-sm">
           {headings.map((heading) => (
             <a
               key={heading.id}
@@ -95,7 +100,8 @@ export function TableOfContents() {
                   ? "bg-primary/10 text-primary font-medium"
                   : "text-foreground/70 hover:text-primary hover:bg-primary/5"
               }`}
-              onClick={() => setTimeout(() => setIsOpen(false), 100)}
+              aria-current={activeId === heading.id ? "location" : undefined}
+              onClick={() => setActiveId(heading.id)}
             >
               {heading.text}
             </a>
