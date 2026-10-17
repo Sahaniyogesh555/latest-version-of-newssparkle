@@ -1,0 +1,436 @@
+================================================================================
+NEWSSPARKLE — PHASE 6 READ-ONLY SUPABASE PREFLIGHT AUDIT
+================================================================================
+Commit audited : 1da587211073264886f8fdbede3df79d689979e7
+Branch         : arena/e59698ee-latest-version-of-newssparkle
+Date           : 2026-10-17
+Mode           : strictly read-only. No CLI command, no database connection, no
+                 object or privilege change, no cron change, no deploy, no
+                 secret change, no publish.
+Companion      : phase6_preflight_readonly.sql (the exact queries to run)
+
+--------------------------------------------------------------------------------
+RESULT
+--------------------------------------------------------------------------------
+  #  Check                                          Verdict
+  -- ---------------------------------------------- ---------
+  1  pg_cron version vs cron.alter_job              BLOCKED
+  2  EXECUTE on cron.alter_job for the push role    BLOCKED
+  3  Extensions / schemas / roles / functions       BLOCKED
+  4  Cron job inventory and active state            BLOCKED
+  5  Effective EXECUTE on SECURITY DEFINER funcs    BLOCKED
+  6  Ordering / idempotency / target compatibility  BLOCKED (local chain PASS)
+  7  Blockers, risks, repo-vs-live discrepancies    PASS (analysis)
+
+  No live check could be executed from this environment. Nothing below about the
+  target project is a measurement: every statement about it is either marked
+  "expected (repository)" or "unverified".
+
+--------------------------------------------------------------------------------
+WHY EVERY LIVE CHECK IS BLOCKED — access evidence
+--------------------------------------------------------------------------------
+Collected in the audit workspace, 2026-10-17:
+
+  $ command -v supabase
+  (no output — no Supabase CLI installed)
+  $ ls node_modules/.bin/supabase
+  absent
+  $ ls supabase/.temp
+  absent — the repository has never been linked to a project from here
+
+  $ env | cut -d= -f1 | grep -Ei 'supabase|postgres|database|pgp|access_token'
+  (no matches — no token, no database URL, no password in the environment)
+
+  $ ls ~/.supabase/access-token ~/.pgpass
+  absent
+
+  $ curl -sS -m 10 https://api.supabase.com/v1/projects
+  curl: (35) OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to
+  api.supabase.com:443
+
+  $ curl -sS -m 10 https://xuqxautmflofkvbsaanh.supabase.co/rest/v1/
+  curl: (35) OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to
+  xuqxautmflofkvbsaanh.supabase.co:443
+
+  The sandbox has outbound access only to github.com, codeload.github.com,
+  api.github.com, registry.npmjs.org, pypi.org, files.pythonhosted.org.
+  api.supabase.com and *.supabase.co are not reachable.
+
+What the repository does contain: the project refs
+(ruusbjlabbojpbawbphc in supabase/config.toml and .env; xuqxautmflofkvbsaanh in
+the operator docs) and the OLD project's anon/publishable key. An anon key is a
+public client credential; it cannot read pg_catalog, cron.job or migrations.
+No database password, no service-role key and no Supabase access token exist in
+this workspace.
+
+=> The audit cannot be completed here. It is not a failure of the project; it is
+   missing access. Section "ACCESS REQUIRED" lists exactly what unblocks it.
+
+--------------------------------------------------------------------------------
+WHAT WAS VERIFIED HERE (label: LOCAL — not the target)
+--------------------------------------------------------------------------------
+L1. The full chain applies in filename order on a real PostgreSQL 18 (PGlite)
+    with the Supabase ACL model, in a test: 14/14 files, 0 errors.
+      src/test/phase6-sql.test.ts > "migration chain > applies every migration
+      in filename order with only the documented substitutions"
+L2. The four Phase 6 migrations are idempotent when re-applied.
+L3. Privileges after EVERY migration file match the declared policy
+    (boundary test), and the real callers still work:
+    service_role -> data RPCs, postgres -> HTTP triggers, anon -> view counter.
+L4. The cron gate produces 8 gated inactive / 6 safe active on a fresh install.
+L5. `npm run verify`: 13 test files, 223 tests, production build OK.
+    `npm run check:functions`: 13/13 Edge Function entrypoints type-check.
+L6. The read-only SQL pack in this directory executes end to end and its
+    transaction really is read-only (an INSERT inside it is rejected with
+    "cannot execute INSERT in a read-only transaction").
+    src/test/preflight-pack.test.ts
+
+These prove the repository is internally consistent and runnable. They do NOT
+prove anything about the target database.
+
+--------------------------------------------------------------------------------
+WHAT WAS VERIFIED FROM UPSTREAM SOURCE (label: UPSTREAM — not the target)
+--------------------------------------------------------------------------------
+U1. pg_cron v1.6.4 defines
+      cron.alter_job(job_id bigint, schedule text, command text, database text,
+                     username text, active boolean) RETURNS void
+    in pg_cron--1.3--1.4.sql (i.e. available since 1.4). The C implementation
+    (src/job_metadata.c AlterJob) builds the UPDATE from the non-NULL arguments
+    only, runs with the extension owner's privileges, and invalidates the job
+    cache. The script ends with
+      REVOKE ALL ON FUNCTION cron.alter_job(...) FROM public;
+    and the same for cron.schedule_in_database(...).
+    Source: codeload.github.com/citusdata/pg_cron, tag v1.6.4.
+
+U2. supabase/postgres builds pg_cron 1.6.4 for PostgreSQL 15, 17 and
+    orioledb-17 (nix/ext/versions.json). The current image tag referenced by the
+    CLI issue below is postgres:17.11.0.002-r0 — the same PostgreSQL 17.11
+    recorded for the target in the earlier audit. A fresh PG 17 project that
+    creates pg_cron gets 1.6.4.
+
+U3. The grants that make cron usable for `postgres` come from the image's
+    after-create script (ansible/files/postgresql_extension_custom_scripts/
+    pg_cron/after-create.sql):
+      grant usage on schema cron to postgres with grant option;
+      grant all on all functions in schema cron to postgres with grant option;
+      alter default privileges ... grant all on functions to postgres ...
+    and from the platform migration 20220713082019 (applied to hosted
+    projects), which does the same for existing and future functions.
+    The current event trigger extensions.grant_pg_cron_access() does NOT grant
+    EXECUTE on already-created functions: it sets default privileges and grants
+    ALL on the cron TABLES only.
+
+U4. On hosted projects the after-create script runs, so `postgres` holds
+    EXECUTE on cron.alter_job. On the CLI's Docker runtime it does not:
+    supabase/cli issue #6978 (opened 2026-10-03) reports
+      Docker: {supabase_admin=X/supabase_admin}
+      Native: {supabase_admin=X/supabase_admin,postgres=X*/supabase_admin}
+    and the exact symptom "permission denied for function alter_job".
+    This is the failure mode to rule out on the target.
+
+U5. supabase/postgres migration 20231020085357 leaves `postgres` with SELECT
+    only on cron.job — which is why the gate uses cron.alter_job (F1).
+
+U6. supabase/postgres migration 20221207154255 grants `postgres` and
+    `service_role` access to vault.secrets / vault.decrypted_secrets and the
+    vault RPCs; 20220713082019 grants EXECUTE on net.http_post to postgres (and
+    to the API roles). These are the run-time dependencies of newsroom_trigger.
+
+--------------------------------------------------------------------------------
+CHECK 1 — pg_cron version and alter_job support
+--------------------------------------------------------------------------------
+Verdict: BLOCKED
+
+Needed: the installed extversion on the target, because the chain calls
+  cron.schedule_in_database(..., active := false)   (first cron file)
+  cron.alter_job(jobid, active => false)            (gate + repair)
+Both functions first appear in pg_cron 1.4 (U1). An older installed version
+makes the first cron migration fail at `schedule_in_database`, before the gate
+and the repair run — the repair cannot rescue it.
+
+Query: phase6_preflight_readonly.sql section C and D.
+Expected (repository assumption, NOT verified):
+  pg_cron 1.6.x, owner supabase_admin, both functions present.
+FAIL if extversion < 1.4 or either function is absent.
+Note: if pg_cron is not installed at all, migration 20260503120214 creates it
+(assuming the execution role is allowed to — see Check 3), and the version
+would then be the image default (1.6.4).
+
+--------------------------------------------------------------------------------
+CHECK 2 — can the migration role call cron.alter_job?
+--------------------------------------------------------------------------------
+Verdict: BLOCKED
+
+Query: phase6_preflight_readonly.sql section D and E.
+Expected (repository assumption): the ACL contains
+  {supabase_admin=X/supabase_admin, postgres=X*/supabase_admin}
+so `has_function_privilege('postgres', ..., 'EXECUTE')` is true.
+
+This is the highest-risk assumption in the chain. pg_cron revokes both
+alter_job and schedule_in_database from PUBLIC (U1); nothing in the extension
+grants them back. The grant comes from Supabase's after-create script (U3) and
+is demonstrably absent on one supported runtime (U4). If it is missing on the
+target, `db push` aborts with "permission denied for function ..." — at
+20261015120200 (schedule_in_database) or at 20261016090100 section 3b (the
+gate, alter_job) — and the push stops mid-chain.
+
+Mitigation if false (requires separate approval, not performed here):
+  - enable/manage pg_cron through the dashboard so the after-create script
+    runs, or
+  - have the platform owner grant EXECUTE explicitly, or
+  - run the push as a role that owns the extension.
+
+--------------------------------------------------------------------------------
+CHECK 3 — extensions, schemas, roles, functions, other prerequisites
+--------------------------------------------------------------------------------
+Verdict: BLOCKED
+
+Required, from the migration sources:
+  extensions  pg_cron (>= 1.4), pg_net, pgcrypto
+  schemas     public, cron, net, vault, extensions, auth (platform-provided)
+  roles       postgres, supabase_admin, anon, authenticated, service_role
+  functions   cron.schedule, cron.schedule_in_database, cron.unschedule,
+              cron.alter_job, net.http_post, vault.create_secret
+  objects     vault.decrypted_secrets (view), publication supabase_realtime
+  tables      none pre-existing: the chain creates all 11 of its own tables
+
+Queries: sections A, B, C, D, F, I and J of the pack.
+Expected: all present; objects section all "MISSING" on a never-migrated
+project (which is what makes a controlled first push safe).
+FAIL if any extension is missing and cannot be created, or if the roles do not
+exist (they are created by the platform, never by this chain).
+
+Note: the chain does not reference auth.* functions; RLS policies use literal
+predicates. The Vault schema is only needed at run time by newsroom_trigger.
+
+--------------------------------------------------------------------------------
+CHECK 4 — cron job inventory and active state
+--------------------------------------------------------------------------------
+Verdict: BLOCKED
+
+Query: section G. It prints one line per job and a total; any command text
+containing "bearer" is replaced by "<redacted: contains Authorization header>"
+(the legacy job embeds an anon JWT).
+Expected on a completed fresh install: 14 jobs, 6 active, 8 inactive, with the
+8 inactive exactly:
+  write-desk, publish-scheduler, auto-publish-morning, auto-publish-midday,
+  auto-publish-evening, breaking-news-monitor, notifications-dispatcher,
+  newsroom-maintenance
+and the 6 active exactly:
+  ingest-feeds, trend-watch, phase6-monitor, validate-feeds-daily,
+  prune-post-view-events, prune-automation
+On an unmigrated project: "cron.job: ABSENT" or 0 rows.
+Any other job, duplicate name, or unexpected active state is drift and must be
+explained before the push.
+
+--------------------------------------------------------------------------------
+CHECK 5 — effective EXECUTE on every SECURITY DEFINER function
+--------------------------------------------------------------------------------
+Verdict: BLOCKED
+
+Query: section H (aclexplode over pg_proc.proacl, plus the public-role sweep).
+Expected end state (this is the policy the test suite enforces locally):
+  anon, authenticated     increment_post_views(text,text) only
+  service_role            increment_post_views, record_alert,
+                          claim_ingested_items, category_published_count,
+                          newsroom_llm_calls_today, newsroom_status,
+                          prune_automation_tables, prune_post_view_events
+  postgres                owner of everything; the four HTTP triggers and the
+                          prunes are granted to it explicitly where needed
+  PUBLIC                  nothing
+On a never-migrated project the sweep returns no rows (no such functions yet).
+On a partially migrated project it shows whatever the last applied file left —
+which is exactly why the per-file privilege changes exist (commit 1da5872).
+
+Important: the expected matrix above is a repository expectation. The live ACL
+may differ (for example if migrations were applied from an older revision).
+
+--------------------------------------------------------------------------------
+CHECK 6 — ordering, idempotency, compatibility with the actual target
+--------------------------------------------------------------------------------
+Verdict: BLOCKED (target) / PASS (repository chain, local PostgreSQL 18)
+
+Local facts (verified, L1/L2):
+  - 14 files, applied in filename order, 0 errors.
+  - order: 20260503120214, 20260503120234, 20260503120252, 20260503120747,
+    20260507084537, 20260507094059, 20260509120000, 20261015120000,
+    20261015120100, 20261015120200, 20261016090000, 20261016090100,
+    20261016090200, 20261017090000.
+  - the four Phase 6 files are idempotent when re-applied; the gate stays
+    closed.
+  - every job-creating file was exercised and no gated job is active after any
+    file (test "never leaves a publishing-capable job active at any point").
+
+Target facts still unknown (blocked):
+  - which of the 14 versions are recorded in supabase_migrations
+    .schema_migrations (0 = fresh, 14 = already pushed, anything between =
+    partial state that needs a plan);
+  - whether the target was ever pushed from an older revision of these files.
+
+Ordering risks that do not depend on the target:
+  R-A. `db push` applies one file per transaction; a failure mid-chain leaves
+       the earlier files applied. Since every file is recorded individually,
+       re-running the push resumes at the failed file. The gate and the
+       privilege repair are both re-runnable.
+  R-B. Two historical files are not idempotent if executed twice by hand:
+       20260507084537 (`ALTER PUBLICATION supabase_realtime ADD TABLE
+       notifications` errors if the table is already a member) and
+       20260503120214 (creates policies without IF NOT EXISTS). The CLI does
+       not re-run applied files, so this only bites on manual re-execution.
+  R-C. The repository now edits migration files that were already committed
+       (1da5872 adds the per-file privilege blocks). On a project that had
+       already recorded those versions, the edits do not re-run; the repair
+       migration 20261017090000 carries the same end state. This is safe but
+       means "what is in the repo" and "what that project applied" differ —
+       relevant only if the target is such a project.
+
+--------------------------------------------------------------------------------
+CHECK 7 — blockers, risks, discrepancies between repo assumptions and live DB
+--------------------------------------------------------------------------------
+Verdict: PASS (analysis complete; the blockers themselves are listed below)
+
+Repository assumptions that the live database may contradict:
+
+  A1  "postgres can execute cron.alter_job and cron.schedule_in_database."
+      Evidence gap: the grant is an image/platform behaviour, not a pg_cron
+      guarantee (U1, U3). Observed missing on at least one runtime (U4).
+      Severity: blocks the push at 20261015120200 (schedule_in_database) or
+      20261016090100 3b (alter_job).
+      Detect: check 2 query. Do not start the push before it returns true.
+
+  A2  "pg_cron is 1.4+."
+      Missing on old projects; breaks the first cron migration.
+      Severity: blocks the push at 20261016090100 / 20260503120747.
+      Detect: check 1 query.
+
+  A3  "pg_net exposes net.http_post(url, body, params, headers,
+      timeout_milliseconds)."
+      Named-argument resolution happens at run time, so an older pg_net fails
+      when the trigger runs, not at push time.
+      Severity: runtime failure of every scheduled job.
+      Detect: section F (`to_regprocedure`).
+
+  A4  "The project is empty / fresh."
+      If it already has tables or jobs from manual work, several migrations
+      fail on duplicate objects or leave drift.
+      Detect: sections I and J.
+
+  A5  "The target was never pushed."
+      If it was, the checked-in edits do not apply retroactively; the repair
+      migration is the backstop for privileges, and the F4 "born inactive"
+      change does not retroactively alter existing job rows (the gate still
+      forces them inactive at 090200/17090000).
+      Detect: section J.
+
+  A6  "Vault rows exist before activation."
+      Not needed for the push, needed before any gated job is enabled; the
+      trigger fails closed without them (by design, F3).
+      Detect: read vault.decrypted_secrets names only — never the values.
+
+Non-blocking discrepancies found during this audit:
+  - supabase/config.toml and .env still point at the old project
+    (ruusbjlabbojpbawbphc); the target is xuqxautmflofkvbsaanh. That is the
+    documented cutover step, not a migration prerequisite.
+  - README/OPERATIONS describe `newsroom_base_url` as mandatory; that matches
+    the code (commit 1da5872), no drift.
+  - The repository's local harness grants EXECUTE on cron.alter_job to postgres
+    explicitly. That models the hosted behaviour (U3/U4), not every runtime;
+    a harness cannot detect A1 on the target.
+
+Security note (read-only observation): pg_cron itself grants SELECT on
+cron.job to PUBLIC (pg_cron.sql). On Supabase that is not reachable through
+PostgREST because the cron schema is not exposed, and 20231020085357 keeps
+`postgres` at SELECT only on that table. No action is recommended here.
+
+--------------------------------------------------------------------------------
+ACCESS REQUIRED TO CLOSE THE BLOCKED CHECKS
+--------------------------------------------------------------------------------
+Any ONE of these:
+
+  1. SQL editor (no credentials leave the owner's hands)
+     Ask a project owner to open the Supabase SQL editor on
+     xuqxautmflofkvbsaanh, paste phase6_preflight_readonly.sql, run it, and
+     return the output. The pack is a single READ ONLY transaction ending in
+     ROLLBACK; it cannot write.
+
+  2. Read-only database connection
+     A connection string for a role with SELECT on pg_catalog, cron, vault
+     (metadata only) and supabase_migrations, plus network egress to the
+     project host from this sandbox. Example form:
+       postgresql://<readonly_role>:<password>@<host>:5432/postgres?sslmode=require
+     Do not paste the password into chat; provide it as a sandbox secret.
+
+  3. Supabase access token + network egress
+     A token with read scope and egress to api.supabase.com. Note that the
+     Management API does not expose pg_proc ACLs or cron.job contents; SQL is
+     still required for checks 2, 4 and 5.
+
+Also required, regardless of the access route:
+  - explicit approval to run the read-only pack against the live project (the
+    previous Phase 0 boundary forbade all live access);
+  - the project ref confirmed in writing (xuqxautmflofkvbsaanh vs the old
+    ruusbjlabbojpbawbphc still in config.toml);
+  - a note of whether the target is hosted Supabase or a Docker/self-hosted
+    stack — that decides the alter_job risk in A1.
+
+--------------------------------------------------------------------------------
+RECOMMENDED NEXT STEP
+--------------------------------------------------------------------------------
+Do not run `supabase db push` yet. One query decides it:
+
+  select has_function_privilege('postgres',
+           'cron.alter_job(bigint,text,text,text,text,boolean)', 'EXECUTE') as can_alter,
+         has_function_privilege('postgres',
+           'cron.schedule_in_database(text,text,text,text,text,boolean)', 'EXECUTE') as can_schedule,
+         (select extversion from pg_extension where extname = 'pg_cron') as pg_cron_version
+ where to_regprocedure('cron.alter_job(bigint,text,text,text,text,boolean)') is not null;
+
+  (a project without pg_cron returns zero rows: extension not installed).
+  - both true and version >= 1.4  -> the two hard blockers are gone; proceed to
+    a controlled dry run of the remaining checks (3-6) and then a push window
+    with the gate verified afterwards (8 inactive / 6 active).
+  - either false                  -> stop. Fix the grant first (dashboard
+    enable, or explicit grant by the platform owner); the push will abort.
+  - version < 1.4                 -> stop. The chain cannot be applied; the
+    repository's documented floor is 1.4.
+
+After the push, the same pack verifies the result: section G must show
+8 inactive / 6 active, section H must show no public access beyond the view
+counter, and section J must list all 14 versions.
+
+--------------------------------------------------------------------------------
+FILES REVIEWED (sha256 prefix, 16 hex)
+--------------------------------------------------------------------------------
+ce9d369e0a31b0f0  20260503120214_5b039c0f-2f69-4801-a38f-ddb80afe0aec.sql
+c2a22eb0a90a92ec  20260503120234_069c8161-8477-4c8e-a7ab-da3aa0f5acc6.sql
+96262790be29f34a  20260503120252_6e668d45-4a09-4ba2-83b6-b250dbbba865.sql
+d6cefab8dd323ac2  20260503120747_10533559-1488-404d-a686-8078a344b3f7.sql
+e52198a792922cc3  20260507084537_497723f8-4ed2-40e2-b0d7-a51bcd1cf178.sql
+64913eea023484d0  20260507094059_0f512013-8fc4-4b95-9567-ed9295af9d33.sql
+d11dac50dabf0d2c  20260509120000_add_breaking_health_categories.sql
+0edfc0b74f853c0b  20261015120000_revoke_public_write_on_posts.sql
+4881eaf3a67de370  20261015120100_post_view_events.sql
+21e319b86f29b844  20261015120200_reschedule_auto_publish_18_per_day.sql
+93c20eef7064848c  20261016090000_phase6_autonomy_schema.sql
+f7c4cf8db588a4f9  20261016090100_phase6_autonomy_crons.sql
+a5d82718041fe8b2  20261016090200_phase6_activation_gate.sql
+2310a90ea323deb1  20261017090000_phase6_privileges_and_gate_repair.sql
+
+Supporting files: docs/OPERATIONS.md, phase6_activation_checklist.txt,
+src/test/phase6-sql.test.ts, src/test/repo-integrity.test.ts,
+src/test/harness/cron-contract.ts, src/test/harness/sql-staging.ts,
+src/test/preflight-pack.test.ts, phase6_preflight_readonly.sql.
+
+--------------------------------------------------------------------------------
+ASSUMPTIONS — stated so they are not mistaken for results
+--------------------------------------------------------------------------------
+  - That the target is a hosted Supabase project on PostgreSQL 17.11 (from the
+    earlier audit), not a Docker/self-hosted stack. Unverified here.
+  - That the target has not been migrated (phase6_activation_checklist.txt
+    assumes this). Unverified here.
+  - That the operator will run the push as `postgres`. Unverified.
+  - That the platform's after-create script has run on the target (U3/U4).
+    This is exactly what check 2 measures.
+
+Nothing in this report was measured against the live database.
+================================================================================
